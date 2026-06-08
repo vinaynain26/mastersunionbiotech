@@ -7,21 +7,249 @@ import type Lenis from '@studio-freight/lenis'
 
 gsap.registerPlugin(SplitText)
 
+// ── Config ────────────────────────────────────────────────────────────────────
+const PX_PER_FRAME    = 12
+const PARALLAX_STRENGTH = 18
+
+// Fluid sim config
+const SIM_RES        = 128   // velocity field resolution
+const VELOCITY_DISS  = 0.80  // low = snaps back very fast
+const PRESSURE_ITER  = 6     // fewer = faster, less lingering
+const CURL_AMOUNT    = 30    // vorticity — higher = more swirl
+const SPLAT_RADIUS   = 0.12  // splat footprint in UV space
+const SPLAT_FORCE    = 2500  // velocity injected per mouse delta
+const DISP_STRENGTH  = 0.004 // how much velocity warps the image UVs
+
 type Props = {
-  frameCount: number
+  frameCount?: number
   folderPath?: string
   extension?: string
 }
 
-const PX_PER_FRAME      = 12
-const DISP_SIZE         = 256
-const DECAY             = 0.018
-const BASE_RADIUS       = 8
-const MAX_RADIUS        = 18
-const PARALLAX_STRENGTH = 18
-// How fast the invisible blob chases the cursor (0 = never, 1 = instant)
-const BLOB_LERP         = 0.06
+// ── Double-buffered FBO ───────────────────────────────────────────────────────
+interface FBO {
+  texture: WebGLTexture
+  fbo: WebGLFramebuffer
+}
 
+class DoubleFBO {
+  read: FBO
+  write: FBO
+  constructor(
+    private gl: WebGLRenderingContext,
+    w: number, h: number,
+    halfFloat: number
+  ) {
+    this.read  = DoubleFBO.makeFBO(gl, w, h, halfFloat)
+    this.write = DoubleFBO.makeFBO(gl, w, h, halfFloat)
+  }
+  static makeFBO(gl: WebGLRenderingContext, w: number, h: number, type: number): FBO {
+    const texture = gl.createTexture()!
+    gl.bindTexture(gl.TEXTURE_2D, texture)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, type, null)
+    const fbo = gl.createFramebuffer()!
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0)
+    gl.viewport(0, 0, w, h)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+    return { texture, fbo }
+  }
+  swap() { const t = this.read; this.read = this.write; this.write = t }
+}
+
+class SingleFBO {
+  texture: WebGLTexture
+  fbo: WebGLFramebuffer
+  constructor(gl: WebGLRenderingContext, w: number, h: number, halfFloat: number) {
+    this.texture = gl.createTexture()!
+    gl.bindTexture(gl.TEXTURE_2D, this.texture)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, halfFloat, null)
+    this.fbo = gl.createFramebuffer()!
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo)
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.texture, 0)
+    gl.viewport(0, 0, w, h)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+  }
+}
+
+// ── Shader compiler ───────────────────────────────────────────────────────────
+function compileShader(gl: WebGLRenderingContext, type: number, src: string) {
+  const s = gl.createShader(type)!
+  gl.shaderSource(s, src)
+  gl.compileShader(s)
+  return s
+}
+
+function makeProgram(gl: WebGLRenderingContext, vert: string, frag: string) {
+  const prog = gl.createProgram()!
+  gl.attachShader(prog, compileShader(gl, gl.VERTEX_SHADER, vert))
+  gl.attachShader(prog, compileShader(gl, gl.FRAGMENT_SHADER, frag))
+  gl.linkProgram(prog)
+  const uniforms: Record<string, WebGLUniformLocation> = {}
+  const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS)
+  for (let i = 0; i < n; i++) {
+    const name = gl.getActiveUniform(prog, i)!.name
+    uniforms[name] = gl.getUniformLocation(prog, name)!
+  }
+  return { prog, uniforms }
+}
+
+// ── Shared vertex shader (full-screen quad) ───────────────────────────────────
+const BASE_VERT = `
+  precision highp float;
+  attribute vec2 aPos;
+  varying vec2 vUv;
+  varying vec2 vL; varying vec2 vR; varying vec2 vT; varying vec2 vB;
+  uniform vec2 texelSize;
+  void main(){
+    vUv = aPos * 0.5 + 0.5;
+    vL  = vUv - vec2(texelSize.x, 0.0);
+    vR  = vUv + vec2(texelSize.x, 0.0);
+    vT  = vUv + vec2(0.0, texelSize.y);
+    vB  = vUv - vec2(0.0, texelSize.y);
+    gl_Position = vec4(aPos, 0.0, 1.0);
+  }`
+
+// ── Fragment shaders ──────────────────────────────────────────────────────────
+const SPLAT_FRAG = `
+  precision highp float;
+  varying vec2 vUv;
+  uniform sampler2D uTarget;
+  uniform float aspectRatio;
+  uniform vec2 point;
+  uniform vec2 velocity;
+  uniform float radius;
+  void main(){
+    vec2 p = vUv - point;
+    p.x *= aspectRatio;
+    float dist = exp(-dot(p,p) / radius);
+    vec2 base = texture2D(uTarget, vUv).xy;
+    gl_FragColor = vec4(base + velocity * dist, 0.0, 1.0);
+  }`
+
+const ADVECT_FRAG = `
+  precision highp float;
+  varying vec2 vUv;
+  uniform sampler2D uVelocity;
+  uniform sampler2D uSource;
+  uniform vec2 texelSize;
+  uniform float dt;
+  uniform float dissipation;
+  void main(){
+    vec2 vel = texture2D(uVelocity, vUv).xy;
+    vec2 coord = vUv - dt * vel * texelSize;
+    gl_FragColor = dissipation * texture2D(uSource, coord);
+    gl_FragColor.a = 1.0;
+  }`
+
+const CURL_FRAG = `
+  precision mediump float;
+  varying vec2 vUv; varying vec2 vL; varying vec2 vR; varying vec2 vT; varying vec2 vB;
+  uniform sampler2D uVelocity;
+  void main(){
+    float L = texture2D(uVelocity, vL).y;
+    float R = texture2D(uVelocity, vR).y;
+    float T = texture2D(uVelocity, vT).x;
+    float B = texture2D(uVelocity, vB).x;
+    gl_FragColor = vec4(0.5 * (R - L - T + B), 0.0, 0.0, 1.0);
+  }`
+
+const VORTICITY_FRAG = `
+  precision highp float;
+  varying vec2 vUv; varying vec2 vL; varying vec2 vR; varying vec2 vT; varying vec2 vB;
+  uniform sampler2D uVelocity;
+  uniform sampler2D uCurl;
+  uniform float curl;
+  uniform float dt;
+  void main(){
+    float L = texture2D(uCurl, vL).x;
+    float R = texture2D(uCurl, vR).x;
+    float T = texture2D(uCurl, vT).x;
+    float B = texture2D(uCurl, vB).x;
+    float C = texture2D(uCurl, vUv).x;
+    vec2 force = vec2(abs(T) - abs(B), abs(R) - abs(L));
+    force /= length(force) + 0.0001;
+    force *= curl * C;
+    force.y *= -1.0;
+    vec2 vel = texture2D(uVelocity, vUv).xy;
+    gl_FragColor = vec4(vel + force * dt, 0.0, 1.0);
+  }`
+
+const DIVERGENCE_FRAG = `
+  precision mediump float;
+  varying vec2 vUv; varying vec2 vL; varying vec2 vR; varying vec2 vT; varying vec2 vB;
+  uniform sampler2D uVelocity;
+  void main(){
+    float L = texture2D(uVelocity, vL).x;
+    float R = texture2D(uVelocity, vR).x;
+    float T = texture2D(uVelocity, vT).y;
+    float B = texture2D(uVelocity, vB).y;
+    gl_FragColor = vec4(0.5 * (R - L + T - B), 0.0, 0.0, 1.0);
+  }`
+
+const PRESSURE_FRAG = `
+  precision mediump float;
+  varying vec2 vUv; varying vec2 vL; varying vec2 vR; varying vec2 vT; varying vec2 vB;
+  uniform sampler2D uPressure;
+  uniform sampler2D uDivergence;
+  void main(){
+    float L = texture2D(uPressure, vL).x;
+    float R = texture2D(uPressure, vR).x;
+    float T = texture2D(uPressure, vT).x;
+    float B = texture2D(uPressure, vB).x;
+    float div = texture2D(uDivergence, vUv).x;
+    gl_FragColor = vec4((L + R + T + B - div) * 0.25, 0.0, 0.0, 1.0);
+  }`
+
+const GRAD_SUB_FRAG = `
+  precision mediump float;
+  varying vec2 vUv; varying vec2 vL; varying vec2 vR; varying vec2 vT; varying vec2 vB;
+  uniform sampler2D uPressure;
+  uniform sampler2D uVelocity;
+  void main(){
+    float L = texture2D(uPressure, vL).x;
+    float R = texture2D(uPressure, vR).x;
+    float T = texture2D(uPressure, vT).x;
+    float B = texture2D(uPressure, vB).x;
+    vec2 vel = texture2D(uVelocity, vUv).xy;
+    gl_FragColor = vec4(vel - vec2(R - L, T - B) * 0.5, 0.0, 1.0);
+  }`
+
+// Final composite: sample video frame distorted by fluid velocity
+const COMPOSITE_VERT = `
+  precision highp float;
+  attribute vec2 aPos;
+  varying vec2 vUv;
+  uniform vec2 uPan;
+  void main(){
+    vUv = aPos * 0.5 + 0.5;
+    // flip Y so frame images render right-side up
+    vUv.y = 1.0 - vUv.y;
+    gl_Position = vec4(aPos + uPan, 0.0, 1.0);
+  }`
+
+const COMPOSITE_FRAG = `
+  precision mediump float;
+  varying vec2 vUv;
+  uniform sampler2D tFrame;
+  uniform sampler2D tVelocity;
+  uniform float uDispStrength;
+  void main(){
+    vec2 vel = texture2D(tVelocity, vUv).xy;
+    // negate so image pulls toward cursor rather than away
+    vec2 uv = clamp(vUv - vel * uDispStrength, 0.001, 0.999);
+    gl_FragColor = texture2D(tFrame, uv);
+  }`
+
+// ── Component ─────────────────────────────────────────────────────────────────
 export default function VideoScrollExperience({
   frameCount = 121,
   folderPath = '/frames',
@@ -34,161 +262,218 @@ export default function VideoScrollExperience({
   const line2Ref       = useRef<HTMLDivElement>(null)
   const checkpointWrap = useRef<HTMLDivElement>(null)
 
-  const glRef         = useRef<WebGLRenderingContext | null>(null)
-  const dispTexRef    = useRef<WebGLTexture | null>(null)
-  const uStrengthRef  = useRef<WebGLUniformLocation | null>(null)
-  const frameTextures = useRef<(WebGLTexture | null)[]>([])
-  const textureReady  = useRef<boolean[]>([])
+  // WebGL core
+  const glRef          = useRef<WebGLRenderingContext | null>(null)
+  const halfFloatRef   = useRef<number>(0)
+  const frameTextures  = useRef<(WebGLTexture | null)[]>([])
+  const textureReady   = useRef<boolean[]>([])
 
-  const dispBufRef   = useRef<Float32Array | null>(null)
-  const dispU8Ref    = useRef<Uint8ClampedArray | null>(null)
-  const dispDirtyRef = useRef(false)
+  // Fluid sim FBOs
+  const velocityRef    = useRef<DoubleFBO | null>(null)
+  const pressureRef    = useRef<DoubleFBO | null>(null)
+  const divergenceRef  = useRef<SingleFBO | null>(null)
+  const curlFBORef     = useRef<SingleFBO | null>(null)
 
-  const targetFrameRef  = useRef(0)
-  const displayFrameRef = useRef(0)
-  const isReadyRef      = useRef(false)
+  // Programs
+  const progSplatRef      = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progAdvectRef     = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progCurlRef       = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progVorticityRef  = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progDivRef        = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progPressureRef   = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progGradSubRef    = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progCompositeRef  = useRef<ReturnType<typeof makeProgram> | null>(null)
 
-  const animatingRef = useRef(false)
-  const directionRef = useRef(1)
-  const progressRef  = useRef(0)
+  // Scroll state
+  const targetFrameRef   = useRef(0)
+  const isReadyRef       = useRef(false)
+  const animatingRef     = useRef(false)
+  const directionRef     = useRef(1)
+  const progressRef      = useRef(0)
 
+  // Checkpoint
   const checkpointShownRef = useRef(false)
   const checkpointTlRef    = useRef<gsap.core.Timeline | null>(null)
   const split1Ref          = useRef<SplitText | null>(null)
   const split2Ref          = useRef<SplitText | null>(null)
 
-  const mouseNormRef = useRef({ x: 0.5, y: 0.5 })  // actual cursor
-  const blobRef      = useRef({ x: 0.5, y: 0.5 })  // lagging blob position
-  const parallaxRef  = useRef({ x: 0, y: 0 })
+  // Mouse / parallax
+  const mouseNormRef  = useRef({ x: 0.5, y: 0.5 })
+  const prevMouseRef  = useRef({ x: 0.5, y: 0.5 })
+  const parallaxRef   = useRef({ x: 0, y: 0 })
 
   const [loadPct, setLoadPct] = useState(0)
   const [loaded,  setLoaded ] = useState(false)
 
-  // ── Displacement ─────────────────────────────────────────────────────────────
-
-  const initBuf = useCallback(() => {
-    const n = DISP_SIZE * DISP_SIZE
-    const f = new Float32Array(n * 2); f.fill(128)
-    dispBufRef.current = f
-    const u = new Uint8ClampedArray(n * 4)
-    for (let i = 0; i < n * 4; i += 4) { u[i] = u[i+1] = 128; u[i+2] = 128; u[i+3] = 255 }
-    dispU8Ref.current = u
-    dispDirtyRef.current = true
+  // ── Blit helper ──────────────────────────────────────────────────────────────
+  const blit = useCallback((targetFBO: WebGLFramebuffer | null, w: number, h: number) => {
+    const gl = glRef.current!
+    gl.bindFramebuffer(gl.FRAMEBUFFER, targetFBO)
+    gl.viewport(0, 0, w, h)
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
   }, [])
 
-  const decayAndQuantise = useCallback(() => {
-    const f = dispBufRef.current, u = dispU8Ref.current
-    if (!f || !u) return
-    let dirty = false
-    const n = DISP_SIZE * DISP_SIZE
-    for (let i = 0, j = 0; i < n; i++, j += 2) {
-      const dr = f[j] - 128, dg = f[j+1] - 128
-      if (Math.abs(dr) < 0.4 && Math.abs(dg) < 0.4) { f[j] = f[j+1] = 128; continue }
-      dirty = true
-      f[j]   = 128 + dr * (1 - DECAY)
-      f[j+1] = 128 + dg * (1 - DECAY)
-      const ui = i * 4
-      u[ui]   = (f[j]   + 0.5) | 0
-      u[ui+1] = (f[j+1] + 0.5) | 0
+  const bindTex = useCallback((unit: number, tex: WebGLTexture) => {
+    const gl = glRef.current!
+    gl.activeTexture(gl.TEXTURE0 + unit)
+    gl.bindTexture(gl.TEXTURE_2D, tex)
+  }, [])
+
+  // ── Fluid step ────────────────────────────────────────────────────────────────
+  const fluidStep = useCallback((dt: number) => {
+    const gl       = glRef.current!
+    const velocity = velocityRef.current!
+    const pressure = pressureRef.current!
+    const divFBO   = divergenceRef.current!
+    const curlFBO  = curlFBORef.current!
+    const S = SIM_RES
+
+    // 1. Curl
+    gl.useProgram(progCurlRef.current!.prog)
+    gl.uniform2f(progCurlRef.current!.uniforms.texelSize, 1/S, 1/S)
+    bindTex(0, velocity.read.texture)
+    gl.uniform1i(progCurlRef.current!.uniforms.uVelocity, 0)
+    blit(curlFBO.fbo, S, S)
+
+    // 2. Vorticity confinement
+    gl.useProgram(progVorticityRef.current!.prog)
+    gl.uniform2f(progVorticityRef.current!.uniforms.texelSize, 1/S, 1/S)
+    bindTex(0, velocity.read.texture)
+    gl.uniform1i(progVorticityRef.current!.uniforms.uVelocity, 0)
+    bindTex(1, curlFBO.texture)
+    gl.uniform1i(progVorticityRef.current!.uniforms.uCurl, 1)
+    gl.uniform1f(progVorticityRef.current!.uniforms.curl, CURL_AMOUNT)
+    gl.uniform1f(progVorticityRef.current!.uniforms.dt, dt)
+    blit(velocity.write.fbo, S, S)
+    velocity.swap()
+
+    // 3. Divergence
+    gl.useProgram(progDivRef.current!.prog)
+    gl.uniform2f(progDivRef.current!.uniforms.texelSize, 1/S, 1/S)
+    bindTex(0, velocity.read.texture)
+    gl.uniform1i(progDivRef.current!.uniforms.uVelocity, 0)
+    blit(divFBO.fbo, S, S)
+
+    // 4. Clear pressure
+    gl.bindFramebuffer(gl.FRAMEBUFFER, pressure.read.fbo)
+    gl.viewport(0, 0, S, S)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+
+    // 5. Pressure solve (Jacobi)
+    gl.useProgram(progPressureRef.current!.prog)
+    gl.uniform2f(progPressureRef.current!.uniforms.texelSize, 1/S, 1/S)
+    bindTex(1, divFBO.texture)
+    gl.uniform1i(progPressureRef.current!.uniforms.uDivergence, 1)
+    for (let i = 0; i < PRESSURE_ITER; i++) {
+      bindTex(0, pressure.read.texture)
+      gl.uniform1i(progPressureRef.current!.uniforms.uPressure, 0)
+      blit(pressure.write.fbo, S, S)
+      pressure.swap()
     }
-    if (dirty) dispDirtyRef.current = true
-  }, [])
 
-  const paintCurl = useCallback((cx: number, cy: number, radius: number, vx: number, vy: number, strength: number) => {
-    const f = dispBufRef.current, u = dispU8Ref.current
-    if (!f || !u) return
-    const S = DISP_SIZE
-    const speed = Math.hypot(vx, vy)
-    if (speed < 0.1 && strength < 0.05) return
-    const inv = 1 / Math.max(speed, 0.001)
-    const nx = vx * inv, ny = vy * inv
-    const x0 = Math.max(0, (cx - radius)|0), x1 = Math.min(S-1, (cx+radius+1)|0)
-    const y0 = Math.max(0, (cy - radius)|0), y1 = Math.min(S-1, (cy+radius+1)|0)
-    const r2 = radius * radius
-    for (let py = y0; py <= y1; py++) {
-      for (let px = x0; px <= x1; px++) {
-        const dx = px-cx, dy = py-cy
-        if (dx*dx+dy*dy > r2) continue
-        const t = 1 - Math.sqrt(dx*dx+dy*dy)/radius
-        const w = t*t*(3-2*t)*strength
-        const fR = nx*85*w, fG = ny*85*w
-        const cw = (1-t)*t*4.5*w
-        const cR = -ny*55*cw, cG = nx*55*cw
-        const j = (py*S+px)*2
-        f[j]   = Math.max(0, Math.min(255, f[j]   + fR + cR))
-        f[j+1] = Math.max(0, Math.min(255, f[j+1] + fG + cG))
-        const ui = (py*S+px)*4
-        u[ui]   = (f[j]   + 0.5)|0
-        u[ui+1] = (f[j+1] + 0.5)|0
-      }
-    }
-    dispDirtyRef.current = true
-  }, [])
+    // 6. Gradient subtraction → divergence-free velocity
+    gl.useProgram(progGradSubRef.current!.prog)
+    gl.uniform2f(progGradSubRef.current!.uniforms.texelSize, 1/S, 1/S)
+    bindTex(0, pressure.read.texture)
+    gl.uniform1i(progGradSubRef.current!.uniforms.uPressure, 0)
+    bindTex(1, velocity.read.texture)
+    gl.uniform1i(progGradSubRef.current!.uniforms.uVelocity, 1)
+    blit(velocity.write.fbo, S, S)
+    velocity.swap()
 
-  // ── WebGL ─────────────────────────────────────────────────────────────────────
+    // 7. Advect velocity (self-advection with dissipation)
+    gl.useProgram(progAdvectRef.current!.prog)
+    gl.uniform2f(progAdvectRef.current!.uniforms.texelSize, 1/S, 1/S)
+    gl.uniform1f(progAdvectRef.current!.uniforms.dt, dt)
+    gl.uniform1f(progAdvectRef.current!.uniforms.dissipation, VELOCITY_DISS)
+    bindTex(0, velocity.read.texture)
+    gl.uniform1i(progAdvectRef.current!.uniforms.uVelocity, 0)
+    bindTex(1, velocity.read.texture)
+    gl.uniform1i(progAdvectRef.current!.uniforms.uSource, 1)
+    blit(velocity.write.fbo, S, S)
+    velocity.swap()
+  }, [blit, bindTex])
 
+  // ── Splat mouse velocity into fluid ───────────────────────────────────────────
+  const splat = useCallback((x: number, y: number, dx: number, dy: number) => {
+    const gl = glRef.current!
+    const velocity = velocityRef.current!
+    const S = SIM_RES
+    const aspect = gl.canvas.width / gl.canvas.height
+
+    gl.useProgram(progSplatRef.current!.prog)
+    gl.uniform2f(progSplatRef.current!.uniforms.texelSize, 1/S, 1/S)
+    bindTex(0, velocity.read.texture)
+    gl.uniform1i(progSplatRef.current!.uniforms.uTarget, 0)
+    gl.uniform1f(progSplatRef.current!.uniforms.aspectRatio, aspect)
+    gl.uniform2f(progSplatRef.current!.uniforms.point, x, y)
+    gl.uniform2f(progSplatRef.current!.uniforms.velocity, dx * SPLAT_FORCE, dy * SPLAT_FORCE)
+    gl.uniform1f(progSplatRef.current!.uniforms.radius, SPLAT_RADIUS / 100)
+    blit(velocity.write.fbo, S, S)
+    velocity.swap()
+  }, [blit, bindTex])
+
+  // ── WebGL init ────────────────────────────────────────────────────────────────
   const initWebGL = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    const gl = canvas.getContext('webgl', { alpha: false, antialias: false }) as WebGLRenderingContext
+
+    const gl = canvas.getContext('webgl', {
+      alpha: false, antialias: false, depth: false, stencil: false
+    }) as WebGLRenderingContext
     if (!gl) return
     glRef.current = gl
 
-    const vert = `
-      attribute vec2 p;
-      varying vec2 v;
-      uniform vec2 uPan;
-      void main(){
-        v = vec2(p.x*.5+.5, .5-p.y*.5);
-        gl_Position = vec4(p + uPan, 0.0, 1.0);
-      }`
+    // Half-float extension for fluid FBOs
+    const hfExt = gl.getExtension('OES_texture_half_float')
+    gl.getExtension('OES_texture_half_float_linear')
+    const halfFloat = hfExt ? hfExt.HALF_FLOAT_OES : gl.UNSIGNED_BYTE
+    halfFloatRef.current = halfFloat
 
-    const frag = `
-      precision mediump float;
-      uniform sampler2D tF, tD;
-      uniform float uS;
-      varying vec2 v;
-      void main(){
-        vec2 px = vec2(5.0 / 256.0);
-        vec2 d = vec2(0.0);
-        d += (texture2D(tD, v).rg                             - 0.5) * 0.25;
-        d += (texture2D(tD, v + vec2( px.x,  0.0)).rg         - 0.5) * 0.12;
-        d += (texture2D(tD, v + vec2(-px.x,  0.0)).rg         - 0.5) * 0.12;
-        d += (texture2D(tD, v + vec2( 0.0,  px.y)).rg         - 0.5) * 0.12;
-        d += (texture2D(tD, v + vec2( 0.0, -px.y)).rg         - 0.5) * 0.12;
-        d += (texture2D(tD, v + vec2( px.x,  px.y)).rg        - 0.5) * 0.065;
-        d += (texture2D(tD, v + vec2(-px.x,  px.y)).rg        - 0.5) * 0.065;
-        d += (texture2D(tD, v + vec2( px.x, -px.y)).rg        - 0.5) * 0.065;
-        d += (texture2D(tD, v + vec2(-px.x, -px.y)).rg        - 0.5) * 0.065;
-        d *= uS * 3.5;
-        gl_FragColor = texture2D(tF, clamp(v + d, 0.001, 0.999));
-      }`
-
-    const compile = (type: number, src: string) => {
-      const s = gl.createShader(type)!
-      gl.shaderSource(s, src); gl.compileShader(s); return s
-    }
-    const prog = gl.createProgram()!
-    gl.attachShader(prog, compile(gl.VERTEX_SHADER,   vert))
-    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, frag))
-    gl.linkProgram(prog); gl.useProgram(prog)
-
+    // Full-screen quad VAO
     const buf = gl.createBuffer()
     gl.bindBuffer(gl.ARRAY_BUFFER, buf)
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW)
-    const loc = gl.getAttribLocation(prog, 'p')
-    gl.enableVertexAttribArray(loc)
-    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0)
 
-    uStrengthRef.current = gl.getUniformLocation(prog, 'uS')
-    ;(glRef as any)._uPan = gl.getUniformLocation(prog, 'uPan')
-    gl.uniform1f(uStrengthRef.current, 0.038)
-    gl.uniform2f((glRef as any)._uPan, 0, 0)
-    gl.uniform1i(gl.getUniformLocation(prog, 'tF'), 0)
-    gl.uniform1i(gl.getUniformLocation(prog, 'tD'), 1)
+    // All programs share texelSize uniform via BASE_VERT
+    const initProg = (frag: string) => {
+      const p = makeProgram(gl, BASE_VERT, frag)
+      gl.useProgram(p.prog)
+      const loc = gl.getAttribLocation(p.prog, 'aPos')
+      gl.enableVertexAttribArray(loc)
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0)
+      return p
+    }
 
+    progSplatRef.current     = initProg(SPLAT_FRAG)
+    progAdvectRef.current    = initProg(ADVECT_FRAG)
+    progCurlRef.current      = initProg(CURL_FRAG)
+    progVorticityRef.current = initProg(VORTICITY_FRAG)
+    progDivRef.current       = initProg(DIVERGENCE_FRAG)
+    progPressureRef.current  = initProg(PRESSURE_FRAG)
+    progGradSubRef.current   = initProg(GRAD_SUB_FRAG)
+
+    // Composite program uses its own vertex shader (handles UV flip + parallax pan)
+    const comp = makeProgram(gl, COMPOSITE_VERT, COMPOSITE_FRAG)
+    gl.useProgram(comp.prog)
+    const compLoc = gl.getAttribLocation(comp.prog, 'aPos')
+    gl.enableVertexAttribArray(compLoc)
+    gl.vertexAttribPointer(compLoc, 2, gl.FLOAT, false, 0, 0)
+    gl.uniform1f(comp.uniforms.uDispStrength, DISP_STRENGTH)
+    gl.uniform1i(comp.uniforms.tFrame, 0)
+    gl.uniform1i(comp.uniforms.tVelocity, 1)
+    gl.uniform2f(comp.uniforms.uPan, 0, 0)
+    progCompositeRef.current = comp
+
+    // Fluid FBOs
+    const S = SIM_RES
+    velocityRef.current   = new DoubleFBO(gl, S, S, halfFloat)
+    pressureRef.current   = new DoubleFBO(gl, S, S, halfFloat)
+    divergenceRef.current = new SingleFBO(gl, S, S, halfFloat)
+    curlFBORef.current    = new SingleFBO(gl, S, S, halfFloat)
+
+    // Frame texture pool
     frameTextures.current = Array.from({ length: frameCount }, () => {
-      gl.activeTexture(gl.TEXTURE0)
       const t = gl.createTexture()!
       gl.bindTexture(gl.TEXTURE_2D, t)
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
@@ -198,21 +483,9 @@ export default function VideoScrollExperience({
       return t
     })
     textureReady.current = new Array(frameCount).fill(false)
-
-    gl.activeTexture(gl.TEXTURE1)
-    const dt = gl.createTexture()!
-    gl.bindTexture(gl.TEXTURE_2D, dt)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-    dispTexRef.current = dt
-    initBuf()
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, DISP_SIZE, DISP_SIZE, 0, gl.RGBA, gl.UNSIGNED_BYTE, dispU8Ref.current)
-  }, [frameCount, initBuf])
+  }, [frameCount])
 
   // ── Frame loading ─────────────────────────────────────────────────────────────
-
   const uploadBitmap = useCallback((bitmap: ImageBitmap, i: number) => {
     const gl = glRef.current
     if (!gl) return
@@ -247,162 +520,115 @@ export default function VideoScrollExperience({
   }, [frameCount, folderPath, extension, uploadBitmap])
 
   // ── Canvas resize ─────────────────────────────────────────────────────────────
-
   const resizeCanvas = useCallback(() => {
-    const canvas = canvasRef.current, gl = glRef.current
+    const canvas = canvasRef.current
+    const gl     = glRef.current
     if (!canvas || !gl) return
     const dpr = Math.min(window.devicePixelRatio, 2)
     canvas.width  = window.innerWidth  * dpr
     canvas.height = window.innerHeight * dpr
     canvas.style.width  = window.innerWidth  + 'px'
     canvas.style.height = window.innerHeight + 'px'
-    gl.viewport(0, 0, canvas.width, canvas.height)
   }, [])
 
-  // ── Checkpoint reveal / hide ──────────────────────────────────────────────────
-
+  // ── Checkpoint ────────────────────────────────────────────────────────────────
   const revealCheckpoint = useCallback(() => {
     if (checkpointShownRef.current) return
     checkpointShownRef.current = true
-
-    const wrap = checkpointWrap.current
-    const l1   = line1Ref.current
-    const l2   = line2Ref.current
+    const wrap = checkpointWrap.current, l1 = line1Ref.current, l2 = line2Ref.current
     if (!wrap || !l1 || !l2) return
-
     checkpointTlRef.current?.kill()
-    split1Ref.current?.revert()
-    split2Ref.current?.revert()
-
+    split1Ref.current?.revert(); split2Ref.current?.revert()
     const s1 = new SplitText(l1, { type: 'chars' })
     const s2 = new SplitText(l2, { type: 'chars' })
-    split1Ref.current = s1
-    split2Ref.current = s2
-
+    split1Ref.current = s1; split2Ref.current = s2
     const allChars = [...s1.chars, ...s2.chars] as HTMLElement[]
     allChars.forEach(ch => {
-      ch.style.display    = 'inline-block'
-      ch.style.opacity    = '0'
-      ch.style.filter     = 'blur(20px)'
-      ch.style.transform  = 'translateY(-30px)'
-      ch.style.color      = '#ffffff'
-      ch.style.willChange = 'filter, opacity, transform'
+      ch.style.display   = 'inline-block'
+      ch.style.opacity   = '0'
+      ch.style.filter    = 'blur(20px)'
+      ch.style.transform = 'translateY(-30px)'
+      ch.style.color     = '#ffffff'
     })
-
     gsap.set(wrap, { visibility: 'visible', opacity: 1 })
-
     const tl = gsap.timeline()
     checkpointTlRef.current = tl
-
-    tl.to(s1.chars as HTMLElement[], {
-      opacity: 1, filter: 'blur(0px)', y: 0,
-      duration: 1.2, ease: 'power3.out',
-      stagger: { each: 0.05, from: 'start' },
-    }, 0)
-
-    tl.to(s2.chars as HTMLElement[], {
-      opacity: 1, filter: 'blur(0px)', y: 0,
-      duration: 1.2, ease: 'power3.out',
-      stagger: { each: 0.05, from: 'start' },
-    }, 0.25)
+    tl.to(s1.chars as HTMLElement[], { opacity:1, filter:'blur(0px)', y:0, duration:1.2, ease:'power3.out', stagger:{each:0.05,from:'start'} }, 0)
+    tl.to(s2.chars as HTMLElement[], { opacity:1, filter:'blur(0px)', y:0, duration:1.2, ease:'power3.out', stagger:{each:0.05,from:'start'} }, 0.25)
   }, [])
 
   const hideCheckpoint = useCallback(() => {
     if (!checkpointShownRef.current) return
     checkpointShownRef.current = false
-
     const wrap = checkpointWrap.current
     if (!wrap) return
-
     checkpointTlRef.current?.kill()
     gsap.to(wrap, {
-      opacity: 0, y: -20, filter: 'blur(14px)',
-      duration: 0.5, ease: 'power2.in',
+      opacity:0, y:-20, filter:'blur(14px)', duration:0.5, ease:'power2.in',
       onComplete: () => {
-        gsap.set(wrap, { visibility: 'hidden', y: 0, filter: 'blur(0px)' })
-        split1Ref.current?.revert()
-        split2Ref.current?.revert()
+        gsap.set(wrap, { visibility:'hidden', y:0, filter:'blur(0px)' })
+        split1Ref.current?.revert(); split2Ref.current?.revert()
       }
     })
   }, [])
 
-  // ── Render loop — blob lerps toward cursor each frame, paints there ───────────
-
+  // ── Render loop ───────────────────────────────────────────────────────────────
   const startRenderLoop = useCallback(() => {
     const gl = glRef.current
     if (!gl) return
     let running = true
+    let lastT   = 0
 
-    const paint = () => {
+    const paint = (t: number) => {
       if (!running) return
+      const dt = Math.min((t - lastT) / 1000, 0.05)
+      lastT = t
 
-      displayFrameRef.current = targetFrameRef.current
-      const frameIdx = Math.max(0, Math.min(frameCount - 1, Math.round(displayFrameRef.current)))
+      const frameIdx = Math.max(0, Math.min(frameCount - 1, Math.round(targetFrameRef.current)))
 
-      if (frameIdx === frameCount - 1 && !checkpointShownRef.current) {
-        revealCheckpoint()
-      }
+      if (frameIdx === frameCount - 1 && !checkpointShownRef.current) revealCheckpoint()
 
-      // ── Blob chases cursor with lag ──────────────────────────────────────────
-      const prevBx = blobRef.current.x
-      const prevBy = blobRef.current.y
-      blobRef.current.x += (mouseNormRef.current.x - blobRef.current.x) * BLOB_LERP
-      blobRef.current.y += (mouseNormRef.current.y - blobRef.current.y) * BLOB_LERP
+      // Step fluid sim
+      if (dt > 0) fluidStep(dt)
 
-      // Velocity of the blob itself (not the cursor)
-      const bvx = (blobRef.current.x - prevBx) * 60 * 55
-      const bvy = (blobRef.current.y - prevBy) * 60 * 55
-      const bSpeed = Math.hypot(bvx, bvy)
-
-      if (bSpeed > 0.2) {
-        const radius   = BASE_RADIUS + Math.min(bSpeed * 0.2, MAX_RADIUS - BASE_RADIUS)
-        const strength = Math.min(0.5 + bSpeed * 0.02, 2.2)
-        paintCurl(
-          blobRef.current.x * DISP_SIZE,
-          blobRef.current.y * DISP_SIZE,
-          radius, bvx, bvy, strength
-        )
-      }
-
-      // ── Parallax ─────────────────────────────────────────────────────────────
+      // Parallax pan
       const mx = mouseNormRef.current.x - 0.5
       const my = mouseNormRef.current.y - 0.5
       parallaxRef.current.x += (mx * PARALLAX_STRENGTH - parallaxRef.current.x) * 0.04
       parallaxRef.current.y += (my * PARALLAX_STRENGTH - parallaxRef.current.y) * 0.04
       const panX =  (parallaxRef.current.x / window.innerWidth)  * 2
       const panY = -(parallaxRef.current.y / window.innerHeight) * 2
-      gl.uniform2f((glRef as any)._uPan, panX, panY)
 
-      // ── Displacement texture upload ───────────────────────────────────────────
-      decayAndQuantise()
-      if (dispDirtyRef.current && dispU8Ref.current) {
-        gl.activeTexture(gl.TEXTURE1)
-        gl.bindTexture(gl.TEXTURE_2D, dispTexRef.current)
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, DISP_SIZE, DISP_SIZE, gl.RGBA, gl.UNSIGNED_BYTE, dispU8Ref.current)
-        dispDirtyRef.current = false
-      }
-
+      // Composite: frame + velocity distortion → screen
       if (textureReady.current[frameIdx]) {
+        const comp = progCompositeRef.current!
+        gl.useProgram(comp.prog)
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height)
+        gl.uniform2f(comp.uniforms.uPan, panX, panY)
+
         gl.activeTexture(gl.TEXTURE0)
         gl.bindTexture(gl.TEXTURE_2D, frameTextures.current[frameIdx])
+        gl.uniform1i(comp.uniforms.tFrame, 0)
+
+        gl.activeTexture(gl.TEXTURE1)
+        gl.bindTexture(gl.TEXTURE_2D, velocityRef.current!.read.texture)
+        gl.uniform1i(comp.uniforms.tVelocity, 1)
+
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
       }
 
       requestAnimationFrame(paint)
     }
-    requestAnimationFrame(paint)
+
+    requestAnimationFrame((t) => { lastT = t; requestAnimationFrame(paint) })
     return () => { running = false }
-  }, [frameCount, decayAndQuantise, revealCheckpoint, paintCurl])
+  }, [frameCount, fluidStep, revealCheckpoint])
 
   // ── Scroll ────────────────────────────────────────────────────────────────────
-
   const handleScroll = useCallback(({ direction }: { scroll: number; direction: number }) => {
     if (!isReadyRef.current) return
-
-    if (direction === -1 && checkpointShownRef.current) {
-      hideCheckpoint()
-    }
-
+    if (direction === -1 && checkpointShownRef.current) hideCheckpoint()
     directionRef.current = direction
     if (animatingRef.current) return
     animatingRef.current = true
@@ -412,45 +638,36 @@ export default function VideoScrollExperience({
 
     const animate = () => {
       progressRef.current += directionRef.current * frameStep
-
       if (progressRef.current <= 0) {
-        progressRef.current = 0
-        targetFrameRef.current = 0
-        animatingRef.current = false
-        return
+        progressRef.current = 0; targetFrameRef.current = 0; animatingRef.current = false; return
       }
       if (progressRef.current >= 1) {
-        progressRef.current = 1
-        targetFrameRef.current = frameCount - 1
-        animatingRef.current = false
-        return
+        progressRef.current = 1; targetFrameRef.current = frameCount - 1; animatingRef.current = false; return
       }
-
-      const p = progressRef.current
-      const eased = p < 0.5
-        ? 4 * p * p * p
-        : 1 - Math.pow(-2 * p + 2, 3) / 2
-
+      const p     = progressRef.current
+      const eased = p < 0.5 ? 4*p*p*p : 1 - Math.pow(-2*p+2,3)/2
       targetFrameRef.current = eased * (frameCount - 1)
       requestAnimationFrame(animate)
     }
-
     requestAnimationFrame(animate)
   }, [frameCount, hideCheckpoint])
 
-  // ── Mouse — just updates cursor position, no painting here ───────────────────
-
+  // ── Mouse → splat ─────────────────────────────────────────────────────────────
   const handleMouseMove = useCallback((e: MouseEvent) => {
     const rect = wrapperRef.current?.getBoundingClientRect()
     if (!rect) return
-    mouseNormRef.current = {
-      x: (e.clientX - rect.left) / rect.width,
-      y: (e.clientY - rect.top)  / rect.height,
+    const nx = (e.clientX - rect.left) / rect.width
+    const ny = (e.clientY - rect.top)  / rect.height
+    const dx = nx - prevMouseRef.current.x
+    const dy = ny - prevMouseRef.current.y
+    prevMouseRef.current  = { x: nx, y: ny }
+    mouseNormRef.current  = { x: nx, y: ny }
+    if (Math.hypot(dx, dy) > 0.0005) {
+      splat(nx, ny, dx, dy)
     }
-  }, [])
+  }, [splat])
 
   // ── Bootstrap ─────────────────────────────────────────────────────────────────
-
   useEffect(() => {
     let lenis: Lenis | undefined
     let stopRender: (() => void) | undefined
@@ -512,22 +729,15 @@ export default function VideoScrollExperience({
           <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
         </div>
 
-        {/* Checkpoint — separate layer above canvas */}
+        {/* Checkpoint */}
         <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 20 }}>
           <div
             ref={checkpointWrap}
             style={{
-              position: 'absolute',
-              top: '20%',
-              left: '50%',
-              transform: 'translateX(-50%)',
-              textAlign: 'center',
-              visibility: 'hidden',
-              opacity: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              gap: '0.1em',
+              position: 'absolute', top: '20%', left: '50%',
+              transform: 'translateX(-50%)', textAlign: 'center',
+              visibility: 'hidden', opacity: 0,
+              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.1em',
             }}
           >
             <div ref={line1Ref} className="checkpoint-line">Checkpoint One</div>
@@ -537,11 +747,24 @@ export default function VideoScrollExperience({
 
         {/* Loader */}
         {!loaded && (
-          <div style={{ position: 'fixed', inset: 0, zIndex: 100, background: '#000', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '2rem' }}>
+          <div style={{
+            position: 'fixed', inset: 0, zIndex: 100, background: '#000',
+            display: 'flex', flexDirection: 'column', alignItems: 'center',
+            justifyContent: 'center', gap: '2rem'
+          }}>
             <div style={{ width: '260px', height: '1px', background: 'rgba(255,255,255,0.12)', position: 'relative', overflow: 'hidden' }}>
-              <div style={{ position: 'absolute', inset: 0, background: '#fff', transformOrigin: 'left', transform: `scaleX(${loadPct / 100})`, transition: 'transform 0.3s ease' }} />
+              <div style={{
+                position: 'absolute', inset: 0, background: '#fff',
+                transformOrigin: 'left',
+                transform: `scaleX(${loadPct / 100})`,
+                transition: 'transform 0.3s ease'
+              }} />
             </div>
-            <p style={{ fontFamily: '"Anton", sans-serif', fontSize: '0.75rem', letterSpacing: '0.3em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)', margin: 0 }}>
+            <p style={{
+              fontFamily: '"Anton", sans-serif', fontSize: '0.75rem',
+              letterSpacing: '0.3em', textTransform: 'uppercase',
+              color: 'rgba(255,255,255,0.4)', margin: 0
+            }}>
               {loadPct < 100 ? `Loading — ${loadPct}%` : 'Starting…'}
             </p>
           </div>
