@@ -1,24 +1,21 @@
 'use client'
 
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { gsap } from 'gsap'
-import { SplitText } from 'gsap/SplitText'
-import type Lenis from '@studio-freight/lenis'
-
-gsap.registerPlugin(SplitText)
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const PX_PER_FRAME    = 12
-const PARALLAX_STRENGTH = 18
+const SOURCE_FPS        = 30     // original video fps — controls autoplay pacing
+const PARALLAX_STRENGTH = 0.065  // max UV pan offset (in 0..1 UV units)
+const PARALLAX_LERP     = 0.06   // how quickly parallax responds to mouse
+const ZOOM              = 1.12   // overscan so panning never reveals edges
 
 // Fluid sim config
-const SIM_RES        = 128   // velocity field resolution
-const VELOCITY_DISS  = 0.80  // low = snaps back very fast
-const PRESSURE_ITER  = 6     // fewer = faster, less lingering
-const CURL_AMOUNT    = 30    // vorticity — higher = more swirl
-const SPLAT_RADIUS   = 0.12  // splat footprint in UV space
-const SPLAT_FORCE    = 2500  // velocity injected per mouse delta
-const DISP_STRENGTH  = 0.004 // how much velocity warps the image UVs
+const SIM_RES        = 128
+const VELOCITY_DISS  = 0.80
+const PRESSURE_ITER  = 6
+const CURL_AMOUNT    = 30
+const SPLAT_RADIUS   = 0.12
+const SPLAT_FORCE    = 2500
+const DISP_STRENGTH  = 0.004
 
 type Props = {
   frameCount?: number
@@ -35,11 +32,7 @@ interface FBO {
 class DoubleFBO {
   read: FBO
   write: FBO
-  constructor(
-    private gl: WebGLRenderingContext,
-    w: number, h: number,
-    halfFloat: number
-  ) {
+  constructor(gl: WebGLRenderingContext, w: number, h: number, halfFloat: number) {
     this.read  = DoubleFBO.makeFBO(gl, w, h, halfFloat)
     this.write = DoubleFBO.makeFBO(gl, w, h, halfFloat)
   }
@@ -80,8 +73,7 @@ class SingleFBO {
   }
 }
 
-// ── Shader compiler ───────────────────────────────────────────────────────────
-function compileShader(gl: WebGLRenderingContext, type: number, src: string) {
+function compile(gl: WebGLRenderingContext, type: number, src: string) {
   const s = gl.createShader(type)!
   gl.shaderSource(s, src)
   gl.compileShader(s)
@@ -90,8 +82,8 @@ function compileShader(gl: WebGLRenderingContext, type: number, src: string) {
 
 function makeProgram(gl: WebGLRenderingContext, vert: string, frag: string) {
   const prog = gl.createProgram()!
-  gl.attachShader(prog, compileShader(gl, gl.VERTEX_SHADER, vert))
-  gl.attachShader(prog, compileShader(gl, gl.FRAGMENT_SHADER, frag))
+  gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, vert))
+  gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, frag))
   gl.linkProgram(prog)
   const uniforms: Record<string, WebGLUniformLocation> = {}
   const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS)
@@ -102,7 +94,7 @@ function makeProgram(gl: WebGLRenderingContext, vert: string, frag: string) {
   return { prog, uniforms }
 }
 
-// ── Shared vertex shader (full-screen quad) ───────────────────────────────────
+// ── Shared vertex shader (full-screen quad, with neighbor UVs for fluid sim) ──
 const BASE_VERT = `
   precision highp float;
   attribute vec2 aPos;
@@ -118,7 +110,7 @@ const BASE_VERT = `
     gl_Position = vec4(aPos, 0.0, 1.0);
   }`
 
-// ── Fragment shaders ──────────────────────────────────────────────────────────
+// ── Fluid sim shaders ─────────────────────────────────────────────────────────
 const SPLAT_FRAG = `
   precision highp float;
   varying vec2 vUv;
@@ -223,17 +215,15 @@ const GRAD_SUB_FRAG = `
     gl_FragColor = vec4(vel - vec2(R - L, T - B) * 0.5, 0.0, 1.0);
   }`
 
-// Final composite: sample video frame distorted by fluid velocity
+// ── Composite: video frame, UV-panned (parallax) + zoomed (overscan) + fluid-distorted ──
 const COMPOSITE_VERT = `
   precision highp float;
   attribute vec2 aPos;
   varying vec2 vUv;
-  uniform vec2 uPan;
   void main(){
     vUv = aPos * 0.5 + 0.5;
-    // flip Y so frame images render right-side up
     vUv.y = 1.0 - vUv.y;
-    gl_Position = vec4(aPos + uPan, 0.0, 1.0);
+    gl_Position = vec4(aPos, 0.0, 1.0);
   }`
 
 const COMPOSITE_FRAG = `
@@ -242,70 +232,59 @@ const COMPOSITE_FRAG = `
   uniform sampler2D tFrame;
   uniform sampler2D tVelocity;
   uniform float uDispStrength;
+  uniform vec2 uPan;
+  uniform float uZoom;
   void main(){
     vec2 vel = texture2D(tVelocity, vUv).xy;
-    // negate so image pulls toward cursor rather than away
-    vec2 uv = clamp(vUv - vel * uDispStrength, 0.001, 0.999);
+    vec2 centered = (vUv - 0.5) / uZoom + 0.5;
+    vec2 panned   = centered + uPan;
+    vec2 uv = clamp(panned - vel * uDispStrength, 0.001, 0.999);
     gl_FragColor = texture2D(tFrame, uv);
   }`
 
-// ── Component ─────────────────────────────────────────────────────────────────
-export default function VideoScrollExperience({
-  frameCount = 121,
-  folderPath = '/frames',
-  extension  = 'webp',
+export default function EntranceVideoExperience({
+  frameCount = 447,
+  folderPath = '/frames_entrance',
+  extension  = 'png',
 }: Props) {
-  const wrapperRef     = useRef<HTMLDivElement>(null)
-  const canvasRef      = useRef<HTMLCanvasElement>(null)
-  const lenisRef       = useRef<Lenis | null>(null)
-  const line1Ref       = useRef<HTMLDivElement>(null)
-  const line2Ref       = useRef<HTMLDivElement>(null)
-  const checkpointWrap = useRef<HTMLDivElement>(null)
+  const wrapperRef = useRef<HTMLDivElement>(null)
+  const canvasRef  = useRef<HTMLCanvasElement>(null)
 
-  // WebGL core
-  const glRef          = useRef<WebGLRenderingContext | null>(null)
-  const halfFloatRef   = useRef<number>(0)
-  const frameTextures  = useRef<(WebGLTexture | null)[]>([])
-  const textureReady   = useRef<boolean[]>([])
+  const glRef         = useRef<WebGLRenderingContext | null>(null)
+  const frameTextures = useRef<(WebGLTexture | null)[]>([])
+  const textureReady  = useRef<boolean[]>([])
 
   // Fluid sim FBOs
-  const velocityRef    = useRef<DoubleFBO | null>(null)
-  const pressureRef    = useRef<DoubleFBO | null>(null)
-  const divergenceRef  = useRef<SingleFBO | null>(null)
-  const curlFBORef     = useRef<SingleFBO | null>(null)
+  const velocityRef   = useRef<DoubleFBO | null>(null)
+  const pressureRef   = useRef<DoubleFBO | null>(null)
+  const divergenceRef = useRef<SingleFBO | null>(null)
+  const curlFBORef    = useRef<SingleFBO | null>(null)
 
   // Programs
-  const progSplatRef      = useRef<ReturnType<typeof makeProgram> | null>(null)
-  const progAdvectRef     = useRef<ReturnType<typeof makeProgram> | null>(null)
-  const progCurlRef       = useRef<ReturnType<typeof makeProgram> | null>(null)
-  const progVorticityRef  = useRef<ReturnType<typeof makeProgram> | null>(null)
-  const progDivRef        = useRef<ReturnType<typeof makeProgram> | null>(null)
-  const progPressureRef   = useRef<ReturnType<typeof makeProgram> | null>(null)
-  const progGradSubRef    = useRef<ReturnType<typeof makeProgram> | null>(null)
-  const progCompositeRef  = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progSplatRef     = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progAdvectRef    = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progCurlRef      = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progVorticityRef = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progDivRef       = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progPressureRef  = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progGradSubRef   = useRef<ReturnType<typeof makeProgram> | null>(null)
+  const progCompositeRef = useRef<ReturnType<typeof makeProgram> | null>(null)
 
-  // Scroll state
-  const targetFrameRef   = useRef(0)
-  const isReadyRef       = useRef(false)
-  const animatingRef     = useRef(false)
-  const directionRef     = useRef(1)
-  const progressRef      = useRef(0)
-
-  // Checkpoint
-  const checkpointShownRef = useRef(false)
-  const checkpointTlRef    = useRef<gsap.core.Timeline | null>(null)
-  const split1Ref          = useRef<SplitText | null>(null)
-  const split2Ref          = useRef<SplitText | null>(null)
+  // Playback state
+  const currentFrameRef = useRef(0)
+  const startTimeRef    = useRef<number | null>(null)
+  const finishedRef     = useRef(false)
+  const readyToPlayRef  = useRef(false) // gated on loaded
 
   // Mouse / parallax
-  const mouseNormRef  = useRef({ x: 0.5, y: 0.5 })
-  const prevMouseRef  = useRef({ x: 0.5, y: 0.5 })
-  const parallaxRef   = useRef({ x: 0, y: 0 })
+  const mouseNormRef = useRef({ x: 0.5, y: 0.5 })
+  const prevMouseRef = useRef({ x: 0.5, y: 0.5 })
+  const parallaxRef  = useRef({ x: 0, y: 0 })
 
   const [loadPct, setLoadPct] = useState(0)
   const [loaded,  setLoaded ] = useState(false)
 
-  // ── Blit helper ──────────────────────────────────────────────────────────────
+  // ── Blit helpers ────────────────────────────────────────────────────────────
   const blit = useCallback((targetFBO: WebGLFramebuffer | null, w: number, h: number) => {
     const gl = glRef.current!
     gl.bindFramebuffer(gl.FRAMEBUFFER, targetFBO)
@@ -319,7 +298,7 @@ export default function VideoScrollExperience({
     gl.bindTexture(gl.TEXTURE_2D, tex)
   }, [])
 
-  // ── Fluid step ────────────────────────────────────────────────────────────────
+  // ── Fluid step ──────────────────────────────────────────────────────────────
   const fluidStep = useCallback((dt: number) => {
     const gl       = glRef.current!
     const velocity = velocityRef.current!
@@ -328,14 +307,12 @@ export default function VideoScrollExperience({
     const curlFBO  = curlFBORef.current!
     const S = SIM_RES
 
-    // 1. Curl
     gl.useProgram(progCurlRef.current!.prog)
     gl.uniform2f(progCurlRef.current!.uniforms.texelSize, 1/S, 1/S)
     bindTex(0, velocity.read.texture)
     gl.uniform1i(progCurlRef.current!.uniforms.uVelocity, 0)
     blit(curlFBO.fbo, S, S)
 
-    // 2. Vorticity confinement
     gl.useProgram(progVorticityRef.current!.prog)
     gl.uniform2f(progVorticityRef.current!.uniforms.texelSize, 1/S, 1/S)
     bindTex(0, velocity.read.texture)
@@ -347,19 +324,16 @@ export default function VideoScrollExperience({
     blit(velocity.write.fbo, S, S)
     velocity.swap()
 
-    // 3. Divergence
     gl.useProgram(progDivRef.current!.prog)
     gl.uniform2f(progDivRef.current!.uniforms.texelSize, 1/S, 1/S)
     bindTex(0, velocity.read.texture)
     gl.uniform1i(progDivRef.current!.uniforms.uVelocity, 0)
     blit(divFBO.fbo, S, S)
 
-    // 4. Clear pressure
     gl.bindFramebuffer(gl.FRAMEBUFFER, pressure.read.fbo)
     gl.viewport(0, 0, S, S)
     gl.clear(gl.COLOR_BUFFER_BIT)
 
-    // 5. Pressure solve (Jacobi)
     gl.useProgram(progPressureRef.current!.prog)
     gl.uniform2f(progPressureRef.current!.uniforms.texelSize, 1/S, 1/S)
     bindTex(1, divFBO.texture)
@@ -371,7 +345,6 @@ export default function VideoScrollExperience({
       pressure.swap()
     }
 
-    // 6. Gradient subtraction → divergence-free velocity
     gl.useProgram(progGradSubRef.current!.prog)
     gl.uniform2f(progGradSubRef.current!.uniforms.texelSize, 1/S, 1/S)
     bindTex(0, pressure.read.texture)
@@ -381,7 +354,6 @@ export default function VideoScrollExperience({
     blit(velocity.write.fbo, S, S)
     velocity.swap()
 
-    // 7. Advect velocity (self-advection with dissipation)
     gl.useProgram(progAdvectRef.current!.prog)
     gl.uniform2f(progAdvectRef.current!.uniforms.texelSize, 1/S, 1/S)
     gl.uniform1f(progAdvectRef.current!.uniforms.dt, dt)
@@ -394,7 +366,7 @@ export default function VideoScrollExperience({
     velocity.swap()
   }, [blit, bindTex])
 
-  // ── Splat mouse velocity into fluid ───────────────────────────────────────────
+  // ── Splat mouse velocity into fluid ─────────────────────────────────────────
   const splat = useCallback((x: number, y: number, dx: number, dy: number) => {
     const gl = glRef.current!
     const velocity = velocityRef.current!
@@ -413,29 +385,24 @@ export default function VideoScrollExperience({
     velocity.swap()
   }, [blit, bindTex])
 
-  // ── WebGL init ────────────────────────────────────────────────────────────────
+  // ── WebGL init ──────────────────────────────────────────────────────────────
   const initWebGL = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-
     const gl = canvas.getContext('webgl', {
-      alpha: false, antialias: false, depth: false, stencil: false
+      alpha: false, antialias: false, depth: false, stencil: false,
     }) as WebGLRenderingContext
     if (!gl) return
     glRef.current = gl
 
-    // Half-float extension for fluid FBOs
     const hfExt = gl.getExtension('OES_texture_half_float')
     gl.getExtension('OES_texture_half_float_linear')
     const halfFloat = hfExt ? hfExt.HALF_FLOAT_OES : gl.UNSIGNED_BYTE
-    halfFloatRef.current = halfFloat
 
-    // Full-screen quad VAO
     const buf = gl.createBuffer()
     gl.bindBuffer(gl.ARRAY_BUFFER, buf)
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW)
 
-    // All programs share texelSize uniform via BASE_VERT
     const initProg = (frag: string) => {
       const p = makeProgram(gl, BASE_VERT, frag)
       gl.useProgram(p.prog)
@@ -453,7 +420,6 @@ export default function VideoScrollExperience({
     progPressureRef.current  = initProg(PRESSURE_FRAG)
     progGradSubRef.current   = initProg(GRAD_SUB_FRAG)
 
-    // Composite program uses its own vertex shader (handles UV flip + parallax pan)
     const comp = makeProgram(gl, COMPOSITE_VERT, COMPOSITE_FRAG)
     gl.useProgram(comp.prog)
     const compLoc = gl.getAttribLocation(comp.prog, 'aPos')
@@ -462,17 +428,16 @@ export default function VideoScrollExperience({
     gl.uniform1f(comp.uniforms.uDispStrength, DISP_STRENGTH)
     gl.uniform1i(comp.uniforms.tFrame, 0)
     gl.uniform1i(comp.uniforms.tVelocity, 1)
+    gl.uniform1f(comp.uniforms.uZoom, ZOOM)
     gl.uniform2f(comp.uniforms.uPan, 0, 0)
     progCompositeRef.current = comp
 
-    // Fluid FBOs
     const S = SIM_RES
     velocityRef.current   = new DoubleFBO(gl, S, S, halfFloat)
     pressureRef.current   = new DoubleFBO(gl, S, S, halfFloat)
     divergenceRef.current = new SingleFBO(gl, S, S, halfFloat)
     curlFBORef.current    = new SingleFBO(gl, S, S, halfFloat)
 
-    // Frame texture pool
     frameTextures.current = Array.from({ length: frameCount }, () => {
       const t = gl.createTexture()!
       gl.bindTexture(gl.TEXTURE_2D, t)
@@ -485,7 +450,6 @@ export default function VideoScrollExperience({
     textureReady.current = new Array(frameCount).fill(false)
   }, [frameCount])
 
-  // ── Frame loading ─────────────────────────────────────────────────────────────
   const uploadBitmap = useCallback((bitmap: ImageBitmap, i: number) => {
     const gl = glRef.current
     if (!gl) return
@@ -515,11 +479,12 @@ export default function VideoScrollExperience({
         Array.from({ length: Math.min(BATCH, frameCount - i) }, (_, k) => loadOne(i + k))
       )
     }
-    isReadyRef.current = true
     setLoaded(true)
+    // Autoplay clock starts fresh from here — not before loading completes.
+    startTimeRef.current = null
+    readyToPlayRef.current = true
   }, [frameCount, folderPath, extension, uploadBitmap])
 
-  // ── Canvas resize ─────────────────────────────────────────────────────────────
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current
     const gl     = glRef.current
@@ -531,48 +496,7 @@ export default function VideoScrollExperience({
     canvas.style.height = window.innerHeight + 'px'
   }, [])
 
-  // ── Checkpoint ────────────────────────────────────────────────────────────────
-  const revealCheckpoint = useCallback(() => {
-    if (checkpointShownRef.current) return
-    checkpointShownRef.current = true
-    const wrap = checkpointWrap.current, l1 = line1Ref.current, l2 = line2Ref.current
-    if (!wrap || !l1 || !l2) return
-    checkpointTlRef.current?.kill()
-    split1Ref.current?.revert(); split2Ref.current?.revert()
-    const s1 = new SplitText(l1, { type: 'chars' })
-    const s2 = new SplitText(l2, { type: 'chars' })
-    split1Ref.current = s1; split2Ref.current = s2
-    const allChars = [...s1.chars, ...s2.chars] as HTMLElement[]
-    allChars.forEach(ch => {
-      ch.style.display   = 'inline-block'
-      ch.style.opacity   = '0'
-      ch.style.filter    = 'blur(20px)'
-      ch.style.transform = 'translateY(-30px)'
-      ch.style.color     = '#ffffff'
-    })
-    gsap.set(wrap, { visibility: 'visible', opacity: 1 })
-    const tl = gsap.timeline()
-    checkpointTlRef.current = tl
-    tl.to(s1.chars as HTMLElement[], { opacity:1, filter:'blur(0px)', y:0, duration:1.2, ease:'power3.out', stagger:{each:0.05,from:'start'} }, 0)
-    tl.to(s2.chars as HTMLElement[], { opacity:1, filter:'blur(0px)', y:0, duration:1.2, ease:'power3.out', stagger:{each:0.05,from:'start'} }, 0.25)
-  }, [])
-
-  const hideCheckpoint = useCallback(() => {
-    if (!checkpointShownRef.current) return
-    checkpointShownRef.current = false
-    const wrap = checkpointWrap.current
-    if (!wrap) return
-    checkpointTlRef.current?.kill()
-    gsap.to(wrap, {
-      opacity:0, y:-20, filter:'blur(14px)', duration:0.5, ease:'power2.in',
-      onComplete: () => {
-        gsap.set(wrap, { visibility:'hidden', y:0, filter:'blur(0px)' })
-        split1Ref.current?.revert(); split2Ref.current?.revert()
-      }
-    })
-  }, [])
-
-  // ── Render loop ───────────────────────────────────────────────────────────────
+  // ── Render loop ─────────────────────────────────────────────────────────────
   const startRenderLoop = useCallback(() => {
     const gl = glRef.current
     if (!gl) return
@@ -584,35 +508,45 @@ export default function VideoScrollExperience({
       const dt = Math.min((t - lastT) / 1000, 0.05)
       lastT = t
 
-      const frameIdx = Math.max(0, Math.min(frameCount - 1, Math.round(targetFrameRef.current)))
+      // ── Autoplay timing — only once loading is fully done ──────────────────
+      if (readyToPlayRef.current && !finishedRef.current) {
+        if (startTimeRef.current === null) startTimeRef.current = t
+        const elapsedSec = (t - startTimeRef.current) / 1000
+        const frame = Math.floor(elapsedSec * SOURCE_FPS)
+        if (frame >= frameCount - 1) {
+          currentFrameRef.current = frameCount - 1
+          finishedRef.current = true
+        } else {
+          currentFrameRef.current = frame
+        }
+      }
 
-      if (frameIdx === frameCount - 1 && !checkpointShownRef.current) revealCheckpoint()
-
-      // Step fluid sim
+      // ── Fluid sim ────────────────────────────────────────────────────────────
       if (dt > 0) fluidStep(dt)
 
-      // Parallax pan
+      // ── Parallax (UV pan, with zoom overscan) ───────────────────────────────
       const mx = mouseNormRef.current.x - 0.5
       const my = mouseNormRef.current.y - 0.5
-      parallaxRef.current.x += (mx * PARALLAX_STRENGTH - parallaxRef.current.x) * 0.04
-      parallaxRef.current.y += (my * PARALLAX_STRENGTH - parallaxRef.current.y) * 0.04
-      const panX =  (parallaxRef.current.x / window.innerWidth)  * 2
-      const panY = -(parallaxRef.current.y / window.innerHeight) * 2
+      const targetX =  mx * PARALLAX_STRENGTH
+      const targetY = -my * PARALLAX_STRENGTH
+      parallaxRef.current.x += (targetX - parallaxRef.current.x) * PARALLAX_LERP
+      parallaxRef.current.y += (targetY - parallaxRef.current.y) * PARALLAX_LERP
 
-      // Composite: frame + velocity distortion → screen
-      if (textureReady.current[frameIdx]) {
+      // ── Composite ────────────────────────────────────────────────────────────
+      const f = currentFrameRef.current
+      if (textureReady.current[f] && velocityRef.current) {
         const comp = progCompositeRef.current!
         gl.useProgram(comp.prog)
         gl.bindFramebuffer(gl.FRAMEBUFFER, null)
         gl.viewport(0, 0, gl.canvas.width, gl.canvas.height)
-        gl.uniform2f(comp.uniforms.uPan, panX, panY)
+        gl.uniform2f(comp.uniforms.uPan, parallaxRef.current.x, parallaxRef.current.y)
 
         gl.activeTexture(gl.TEXTURE0)
-        gl.bindTexture(gl.TEXTURE_2D, frameTextures.current[frameIdx])
+        gl.bindTexture(gl.TEXTURE_2D, frameTextures.current[f])
         gl.uniform1i(comp.uniforms.tFrame, 0)
 
         gl.activeTexture(gl.TEXTURE1)
-        gl.bindTexture(gl.TEXTURE_2D, velocityRef.current!.read.texture)
+        gl.bindTexture(gl.TEXTURE_2D, velocityRef.current.read.texture)
         gl.uniform1i(comp.uniforms.tVelocity, 1)
 
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
@@ -623,36 +557,9 @@ export default function VideoScrollExperience({
 
     requestAnimationFrame((t) => { lastT = t; requestAnimationFrame(paint) })
     return () => { running = false }
-  }, [frameCount, fluidStep, revealCheckpoint])
+  }, [frameCount, fluidStep])
 
-  // ── Scroll ────────────────────────────────────────────────────────────────────
-  const handleScroll = useCallback(({ direction }: { scroll: number; direction: number }) => {
-    if (!isReadyRef.current) return
-    if (direction === -1 && checkpointShownRef.current) hideCheckpoint()
-    directionRef.current = direction
-    if (animatingRef.current) return
-    animatingRef.current = true
-
-    const duration  = 1800
-    const frameStep = (1 / 60) / (duration / 1000)
-
-    const animate = () => {
-      progressRef.current += directionRef.current * frameStep
-      if (progressRef.current <= 0) {
-        progressRef.current = 0; targetFrameRef.current = 0; animatingRef.current = false; return
-      }
-      if (progressRef.current >= 1) {
-        progressRef.current = 1; targetFrameRef.current = frameCount - 1; animatingRef.current = false; return
-      }
-      const p     = progressRef.current
-      const eased = p < 0.5 ? 4*p*p*p : 1 - Math.pow(-2*p+2,3)/2
-      targetFrameRef.current = eased * (frameCount - 1)
-      requestAnimationFrame(animate)
-    }
-    requestAnimationFrame(animate)
-  }, [frameCount, hideCheckpoint])
-
-  // ── Mouse → splat ─────────────────────────────────────────────────────────────
+  // ── Mouse → parallax target + splat ────────────────────────────────────────
   const handleMouseMove = useCallback((e: MouseEvent) => {
     const rect = wrapperRef.current?.getBoundingClientRect()
     if (!rect) return
@@ -660,16 +567,15 @@ export default function VideoScrollExperience({
     const ny = (e.clientY - rect.top)  / rect.height
     const dx = nx - prevMouseRef.current.x
     const dy = ny - prevMouseRef.current.y
-    prevMouseRef.current  = { x: nx, y: ny }
-    mouseNormRef.current  = { x: nx, y: ny }
+    prevMouseRef.current = { x: nx, y: ny }
+    mouseNormRef.current = { x: nx, y: ny }
     if (Math.hypot(dx, dy) > 0.0005) {
       splat(nx, ny, dx, dy)
     }
   }, [splat])
 
-  // ── Bootstrap ─────────────────────────────────────────────────────────────────
+  // ── Bootstrap ───────────────────────────────────────────────────────────────
   useEffect(() => {
-    let lenis: Lenis | undefined
     let stopRender: (() => void) | undefined
 
     const init = async () => {
@@ -677,15 +583,6 @@ export default function VideoScrollExperience({
       resizeCanvas()
       stopRender = startRenderLoop() ?? undefined
       await preloadFrames()
-
-      const { default: Lenis } = await import('@studio-freight/lenis')
-      lenis = new Lenis({ lerp: 0.08, smoothWheel: true, wheelMultiplier: 1 })
-      lenisRef.current = lenis
-      lenis.on('scroll', handleScroll)
-
-      const raf = (t: number) => { lenis?.raf(t); requestAnimationFrame(raf) }
-      requestAnimationFrame(raf)
-
       window.addEventListener('resize',    resizeCanvas)
       window.addEventListener('mousemove', handleMouseMove)
     }
@@ -693,84 +590,44 @@ export default function VideoScrollExperience({
     init()
 
     return () => {
-      lenis?.destroy()
       stopRender?.()
       window.removeEventListener('resize',    resizeCanvas)
       window.removeEventListener('mousemove', handleMouseMove)
       const gl = glRef.current
       if (gl) frameTextures.current.forEach(t => t && gl.deleteTexture(t))
     }
-  }, [initWebGL, resizeCanvas, preloadFrames, startRenderLoop, handleScroll, handleMouseMove])
+  }, [initWebGL, resizeCanvas, preloadFrames, startRenderLoop, handleMouseMove])
 
   return (
-    <>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Anton&display=swap');
-        * { scrollbar-width: none; }
-        *::-webkit-scrollbar { display: none; }
-        .checkpoint-line {
-          font-family: 'Anton', sans-serif;
-          font-size: clamp(2.8rem, 8vw, 6rem);
-          letter-spacing: 0.06em;
-          text-transform: uppercase;
-          color: #ffffff;
-          line-height: 1.1;
-          display: block;
-        }
-      `}</style>
+    <div
+      ref={wrapperRef}
+      style={{ position: 'fixed', inset: 0, width: '100vw', height: '100vh', overflow: 'hidden', background: '#000' }}
+    >
+      <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
 
-      <div style={{ height: `calc(${frameCount * PX_PER_FRAME}px + 100vh)`, position: 'relative' }}>
-
-        {/* WebGL canvas */}
-        <div
-          ref={wrapperRef}
-          style={{ position: 'fixed', inset: 0, width: '100vw', height: '100vh', overflow: 'hidden', background: '#000' }}
-        >
-          <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
-        </div>
-
-        {/* Checkpoint */}
-        <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 20 }}>
-          <div
-            ref={checkpointWrap}
-            style={{
-              position: 'absolute', top: '20%', left: '50%',
-              transform: 'translateX(-50%)', textAlign: 'center',
-              visibility: 'hidden', opacity: 0,
-              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.1em',
-            }}
-          >
-            <div ref={line1Ref} className="checkpoint-line">Checkpoint One</div>
-            <div ref={line2Ref} className="checkpoint-line">Complete</div>
+      {!loaded && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 100, background: '#000',
+          display: 'flex', flexDirection: 'column', alignItems: 'center',
+          justifyContent: 'center', gap: '2rem'
+        }}>
+          <div style={{ width: '260px', height: '1px', background: 'rgba(255,255,255,0.12)', position: 'relative', overflow: 'hidden' }}>
+            <div style={{
+              position: 'absolute', inset: 0, background: '#fff',
+              transformOrigin: 'left',
+              transform: `scaleX(${loadPct / 100})`,
+              transition: 'transform 0.3s ease'
+            }} />
           </div>
-        </div>
-
-        {/* Loader */}
-        {!loaded && (
-          <div style={{
-            position: 'fixed', inset: 0, zIndex: 100, background: '#000',
-            display: 'flex', flexDirection: 'column', alignItems: 'center',
-            justifyContent: 'center', gap: '2rem'
+          <p style={{
+            fontFamily: '"Anton", sans-serif', fontSize: '0.75rem',
+            letterSpacing: '0.3em', textTransform: 'uppercase',
+            color: 'rgba(255,255,255,0.4)', margin: 0
           }}>
-            <div style={{ width: '260px', height: '1px', background: 'rgba(255,255,255,0.12)', position: 'relative', overflow: 'hidden' }}>
-              <div style={{
-                position: 'absolute', inset: 0, background: '#fff',
-                transformOrigin: 'left',
-                transform: `scaleX(${loadPct / 100})`,
-                transition: 'transform 0.3s ease'
-              }} />
-            </div>
-            <p style={{
-              fontFamily: '"Anton", sans-serif', fontSize: '0.75rem',
-              letterSpacing: '0.3em', textTransform: 'uppercase',
-              color: 'rgba(255,255,255,0.4)', margin: 0
-            }}>
-              {loadPct < 100 ? `Loading — ${loadPct}%` : 'Starting…'}
-            </p>
-          </div>
-        )}
-
-      </div>
-    </>
+            {loadPct < 100 ? `Loading — ${loadPct}%` : 'Starting…'}
+          </p>
+        </div>
+      )}
+    </div>
   )
 }
