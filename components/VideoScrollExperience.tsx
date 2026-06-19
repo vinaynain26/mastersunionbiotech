@@ -14,23 +14,20 @@ import Image from "next/image";
 gsap.registerPlugin(SplitText);
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const SOURCE_FPS = 20;         // loop playback FPS (was 24)
-const TRANSITION_FPS = 60;     // FPS during forward/backward scroll transition
+const SOURCE_FPS        = 20;
+const TRANSITION_FPS    = 60;
 const PARALLAX_STRENGTH = 0.032;
-const PARALLAX_LERP = 0.06;
-const ZOOM = 1.12;
-
-// Content fade timing — must be fast enough that fade-out finishes well before
-// the camera transition does, and fade-in starts the instant we arrive.
-const CONTENT_FADE_MS = 280;
+const PARALLAX_LERP     = 0.06;
+const ZOOM              = 1.12;
+const CONTENT_FADE_MS   = 280;
 
 // ── Loop ranges (0-indexed) ───────────────────────────────────────────────────
 const LOOPS = [
-  { start: 10, end: 48 },   // 0 — initial
+  { start: 10,  end: 48  }, // 0 — initial
   { start: 125, end: 168 }, // 1 — origin
   { start: 220, end: 260 }, // 2 — discover
-  { start: 405, end: 420 }, // 3 — NEW placeholder
-  { start: 660, end: 680 }, // 4 — NEW placeholder
+  { start: 405, end: 420 }, // 3 — placeholder
+  { start: 660, end: 680 }, // 4 — placeholder
 ];
 
 // ── Loop copy ─────────────────────────────────────────────────────────────────
@@ -42,33 +39,30 @@ const LOOP_CONTENT = [
   { component: Loop4 },
 ];
 
-const NAV_LABELS = [
-  "Origin",
-  "Discover",
-  "Highlights",
-  "Speakers",
-  "Awards",
-  "Passes",
-];
+const NAV_LABELS = ["Origin", "Discover", "Highlights", "Speakers", "Awards", "Passes"];
 
 // ── Fluid sim ─────────────────────────────────────────────────────────────────
-const SIM_RES = 128;
+const SIM_RES       = 128;
 const VELOCITY_DISS = 0.8;
 const PRESSURE_ITER = 6;
-const CURL_AMOUNT = 30;
-const SPLAT_RADIUS = 0.055;
-const SPLAT_FORCE = 2500;
+const CURL_AMOUNT   = 30;
+const SPLAT_RADIUS  = 0.055;
+const SPLAT_FORCE   = 2500;
 const DISP_STRENGTH = 0.004;
 
 const SCROLL_THRESHOLD = 30;
 
 // ── Texture window config ─────────────────────────────────────────────────────
 const WINDOW_BEHIND = 30;
-const WINDOW_AHEAD = 150;
-const FETCH_BATCH = 24;
-const INITIAL_LOAD = 60;
+const WINDOW_AHEAD  = 150;
+const FETCH_BATCH   = 24;
 
-// ── Ease-in-out helper (t in 0..1) ───────────────────────────────────────────
+// ── Progressive cache config ──────────────────────────────────────────────────
+// How many inter-loop transition frames to pre-cache while a loop is playing.
+// e.g. if current loop ends at 168 and next starts at 220, we cache 168→220.
+const INTERLOOP_PREFETCH_BATCH = 16;
+
+// ── Ease-in-out helper ────────────────────────────────────────────────────────
 function easeInOut(t: number): number {
   return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
 }
@@ -79,16 +73,12 @@ type Props = {
   extension?: string;
 };
 
-interface FBO {
-  texture: WebGLTexture;
-  fbo: WebGLFramebuffer;
-}
+interface FBO { texture: WebGLTexture; fbo: WebGLFramebuffer; }
 
 class DoubleFBO {
-  read: FBO;
-  write: FBO;
+  read: FBO; write: FBO;
   constructor(gl: WebGLRenderingContext, w: number, h: number, t: number) {
-    this.read = DoubleFBO.make(gl, w, h, t);
+    this.read  = DoubleFBO.make(gl, w, h, t);
     this.write = DoubleFBO.make(gl, w, h, t);
   }
   static make(gl: WebGLRenderingContext, w: number, h: number, type: number): FBO {
@@ -102,20 +92,14 @@ class DoubleFBO {
     const fbo = gl.createFramebuffer()!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-    gl.viewport(0, 0, w, h);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.viewport(0, 0, w, h); gl.clear(gl.COLOR_BUFFER_BIT);
     return { texture, fbo };
   }
-  swap() {
-    const t = this.read;
-    this.read = this.write;
-    this.write = t;
-  }
+  swap() { const t = this.read; this.read = this.write; this.write = t; }
 }
 
 class SingleFBO {
-  texture: WebGLTexture;
-  fbo: WebGLFramebuffer;
+  texture: WebGLTexture; fbo: WebGLFramebuffer;
   constructor(gl: WebGLRenderingContext, w: number, h: number, type: number) {
     this.texture = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
@@ -127,16 +111,12 @@ class SingleFBO {
     this.fbo = gl.createFramebuffer()!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.texture, 0);
-    gl.viewport(0, 0, w, h);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.viewport(0, 0, w, h); gl.clear(gl.COLOR_BUFFER_BIT);
   }
 }
 
 function compile(gl: WebGLRenderingContext, type: number, src: string) {
-  const s = gl.createShader(type)!;
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  return s;
+  const s = gl.createShader(type)!; gl.shaderSource(s, src); gl.compileShader(s); return s;
 }
 function makeProgram(gl: WebGLRenderingContext, vert: string, frag: string) {
   const prog = gl.createProgram()!;
@@ -152,11 +132,11 @@ function makeProgram(gl: WebGLRenderingContext, vert: string, frag: string) {
   return { prog, uniforms };
 }
 
+// ── Shaders ───────────────────────────────────────────────────────────────────
 const BASE_VERT = `
   precision highp float;
   attribute vec2 aPos;
-  varying vec2 vUv;
-  varying vec2 vL; varying vec2 vR; varying vec2 vT; varying vec2 vB;
+  varying vec2 vUv, vL, vR, vT, vB;
   uniform vec2 texelSize;
   void main(){
     vUv=aPos*.5+.5;
@@ -170,7 +150,7 @@ const SPLAT_FRAG = `
   varying vec2 vUv;
   uniform sampler2D uTarget;
   uniform float aspectRatio;
-  uniform vec2 point,velocity;
+  uniform vec2 point, velocity;
   uniform float radius;
   void main(){
     vec2 p=vUv-point; p.x*=aspectRatio;
@@ -181,9 +161,9 @@ const SPLAT_FRAG = `
 const ADVECT_FRAG = `
   precision highp float;
   varying vec2 vUv;
-  uniform sampler2D uVelocity,uSource;
+  uniform sampler2D uVelocity, uSource;
   uniform vec2 texelSize;
-  uniform float dt,dissipation;
+  uniform float dt, dissipation;
   void main(){
     vec2 coord=vUv-dt*texture2D(uVelocity,vUv).xy*texelSize;
     gl_FragColor=dissipation*texture2D(uSource,coord);
@@ -192,7 +172,7 @@ const ADVECT_FRAG = `
 
 const CURL_FRAG = `
   precision mediump float;
-  varying vec2 vUv,vL,vR,vT,vB;
+  varying vec2 vUv, vL, vR, vT, vB;
   uniform sampler2D uVelocity;
   void main(){
     gl_FragColor=vec4(.5*(texture2D(uVelocity,vR).y-texture2D(uVelocity,vL).y
@@ -201,12 +181,12 @@ const CURL_FRAG = `
 
 const VORTICITY_FRAG = `
   precision highp float;
-  varying vec2 vUv,vL,vR,vT,vB;
-  uniform sampler2D uVelocity,uCurl;
-  uniform float curl,dt;
+  varying vec2 vUv, vL, vR, vT, vB;
+  uniform sampler2D uVelocity, uCurl;
+  uniform float curl, dt;
   void main(){
-    float L=texture2D(uCurl,vL).x,R=texture2D(uCurl,vR).x;
-    float T=texture2D(uCurl,vT).x,B=texture2D(uCurl,vB).x;
+    float L=texture2D(uCurl,vL).x, R=texture2D(uCurl,vR).x;
+    float T=texture2D(uCurl,vT).x, B=texture2D(uCurl,vB).x;
     float C=texture2D(uCurl,vUv).x;
     vec2 force=vec2(abs(T)-abs(B),abs(R)-abs(L));
     force/=length(force)+.0001; force*=curl*C; force.y*=-1.;
@@ -215,7 +195,7 @@ const VORTICITY_FRAG = `
 
 const DIVERGENCE_FRAG = `
   precision mediump float;
-  varying vec2 vUv,vL,vR,vT,vB;
+  varying vec2 vUv, vL, vR, vT, vB;
   uniform sampler2D uVelocity;
   void main(){
     gl_FragColor=vec4(.5*(texture2D(uVelocity,vR).x-texture2D(uVelocity,vL).x
@@ -224,8 +204,8 @@ const DIVERGENCE_FRAG = `
 
 const PRESSURE_FRAG = `
   precision mediump float;
-  varying vec2 vUv,vL,vR,vT,vB;
-  uniform sampler2D uPressure,uDivergence;
+  varying vec2 vUv, vL, vR, vT, vB;
+  uniform sampler2D uPressure, uDivergence;
   void main(){
     gl_FragColor=vec4((texture2D(uPressure,vL).x+texture2D(uPressure,vR).x
       +texture2D(uPressure,vT).x+texture2D(uPressure,vB).x
@@ -234,8 +214,8 @@ const PRESSURE_FRAG = `
 
 const GRAD_SUB_FRAG = `
   precision mediump float;
-  varying vec2 vUv,vL,vR,vT,vB;
-  uniform sampler2D uPressure,uVelocity;
+  varying vec2 vUv, vL, vR, vT, vB;
+  uniform sampler2D uPressure, uVelocity;
   void main(){
     gl_FragColor=vec4(texture2D(uVelocity,vUv).xy-vec2(
       texture2D(uPressure,vR).x-texture2D(uPressure,vL).x,
@@ -255,111 +235,100 @@ const COMPOSITE_FRAG = `
   uniform float uDispStrength, uZoom, uBlend;
   uniform vec2 uPan;
   void main(){
-    vec2 uv = clamp((vUv-.5)/uZoom+.5+uPan - texture2D(tVelocity,vUv).xy*uDispStrength, .001, .999);
-    vec4 curr = texture2D(tFrame, uv);
-    vec4 prev = texture2D(tPrev,  uv);
-    gl_FragColor = mix(prev, curr, uBlend);
+    vec2 uv=clamp((vUv-.5)/uZoom+.5+uPan-texture2D(tVelocity,vUv).xy*uDispStrength,.001,.999);
+    gl_FragColor=mix(texture2D(tPrev,uv), texture2D(tFrame,uv), uBlend);
   }`;
 
-  const BITMAP_CACHE = new Map<number, ImageBitmap>();
+// ── Bitmap cache (module-level, survives re-renders) ─────────────────────────
+const BITMAP_CACHE = new Map<number, ImageBitmap>();
 
 const trimBitmapCache = (max = 600) => {
   if (BITMAP_CACHE.size <= max) return;
   const keys = Array.from(BITMAP_CACHE.keys());
-  const toEvict = keys.slice(0, BITMAP_CACHE.size - max);
-  for (const k of toEvict) {
+  for (const k of keys.slice(0, BITMAP_CACHE.size - max)) {
     BITMAP_CACHE.get(k)?.close();
     BITMAP_CACHE.delete(k);
   }
 };
 
+// ── Component ─────────────────────────────────────────────────────────────────
 export default function VideoScrollExperience({
   frameCount = 1022,
   folderPath = "https://images.mastersunion.link/bio-frames/19062026/v1",
-  extension = "webp",
+  extension  = "webp",
 }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const glRef = useRef<WebGLRenderingContext | null>(null);
+  const canvasRef  = useRef<HTMLCanvasElement>(null);
+  const glRef      = useRef<WebGLRenderingContext | null>(null);
 
   const frameTextures = useRef<(WebGLTexture | null)[]>([]);
-  const textureReady = useRef<boolean[]>([]);
-  const loadingSet = useRef<Set<number>>(new Set());
-  const abortMap = useRef<Map<number, AbortController>>(new Map());
+  const textureReady  = useRef<boolean[]>([]);
+  const loadingSet    = useRef<Set<number>>(new Set());
+  const abortMap      = useRef<Map<number, AbortController>>(new Map());
 
-  const velocityRef = useRef<DoubleFBO | null>(null);
-  const pressureRef = useRef<DoubleFBO | null>(null);
+  const velocityRef   = useRef<DoubleFBO | null>(null);
+  const pressureRef   = useRef<DoubleFBO | null>(null);
   const divergenceRef = useRef<SingleFBO | null>(null);
-  const curlFBORef = useRef<SingleFBO | null>(null);
+  const curlFBORef    = useRef<SingleFBO | null>(null);
 
-  const progSplatRef = useRef<ReturnType<typeof makeProgram> | null>(null);
-  const progAdvectRef = useRef<ReturnType<typeof makeProgram> | null>(null);
-  const progCurlRef = useRef<ReturnType<typeof makeProgram> | null>(null);
+  const progSplatRef     = useRef<ReturnType<typeof makeProgram> | null>(null);
+  const progAdvectRef    = useRef<ReturnType<typeof makeProgram> | null>(null);
+  const progCurlRef      = useRef<ReturnType<typeof makeProgram> | null>(null);
   const progVorticityRef = useRef<ReturnType<typeof makeProgram> | null>(null);
-  const progDivRef = useRef<ReturnType<typeof makeProgram> | null>(null);
-  const progPressureRef = useRef<ReturnType<typeof makeProgram> | null>(null);
-  const progGradSubRef = useRef<ReturnType<typeof makeProgram> | null>(null);
+  const progDivRef       = useRef<ReturnType<typeof makeProgram> | null>(null);
+  const progPressureRef  = useRef<ReturnType<typeof makeProgram> | null>(null);
+  const progGradSubRef   = useRef<ReturnType<typeof makeProgram> | null>(null);
   const progCompositeRef = useRef<ReturnType<typeof makeProgram> | null>(null);
 
-  const frameFloatRef = useRef(0);
-  const directionRef = useRef(0);
+  const frameFloatRef  = useRef(0);
+  const directionRef   = useRef(0);
   const currentLoopRef = useRef(0);
-  const readyRef = useRef(false);
-  const scrollAccRef = useRef(0);
+  const readyRef       = useRef(false);
+  const scrollAccRef   = useRef(0);
 
-  // Which way we're currently playing *inside* the active loop: 1 = forward
-  // toward loop.end, -1 = reverse back toward loop.start (ping-pong).
-  // This is what removes the end→start hard cut: we never jump from `end`
-  // straight to `start`, we just reverse direction at each edge.
+  // Ping-pong direction inside the active loop: +1 forward, -1 reverse
   const loopPlayDirRef = useRef(1);
 
-  // ── Transition state ─────────────────────────────────────────────────────────
-  // isTransitioningRef: true while scrubbing between loops (locks scroll)
-  const isTransitioningRef = useRef(false);
-  // progress of current transition 0→1 for ease-in-out
-  const transitionProgressRef = useRef(0);
-  // total frame distance to cover in this transition
-  const transitionTotalRef = useRef(0);
-  // frames covered so far
-  const transitionCoveredRef = useRef(0);
-  // direction of transition: +1 or -1
-  const transitionDirRef = useRef(0);
+  // ── Transition state ──────────────────────────────────────────────────────
+  const isTransitioningRef    = useRef(false);
+  const transitionTotalRef    = useRef(0);
+  const transitionCoveredRef  = useRef(0);
+  const transitionDirRef      = useRef(0);
+
+  // ── Progressive cache tracking ────────────────────────────────────────────
+  // Which loop index has already had its "next loop + inter-loop" frames queued
+  const cachedUpToLoopRef = useRef(-1);
+  // Whether a background cache job is running (prevents overlap)
+  const bgCachingRef      = useRef(false);
 
   const prevFrameTexRef = useRef<WebGLTexture | null>(null);
-  const blendRef = useRef(1.0);
+  const blendRef        = useRef(1.0);
 
   const mouseNormRef = useRef({ x: 0.5, y: 0.5 });
   const prevMouseRef = useRef({ x: 0.5, y: 0.5 });
-  const parallaxRef = useRef({ x: 0, y: 0 });
+  const parallaxRef  = useRef({ x: 0, y: 0 });
 
-  const [loadPct, setLoadPct] = useState(0);
-  const [loaded, setLoaded] = useState(false);
-  const [debugFrame, setDebugFrame] = useState(0);
-  const [debugPhase, setDebugPhase] = useState("INIT");
+  const [loadPct, setLoadPct]           = useState(0);
+  const [loaded, setLoaded]             = useState(false);
+  const [debugFrame, setDebugFrame]     = useState(0);
+  const [debugPhase, setDebugPhase]     = useState("INIT");
   const [activeLoopIdx, setActiveLoopIdx] = useState(0);
-  const [pillTop, setPillTop] = useState(0);
+  const [pillTop, setPillTop]           = useState(0);
+  const [contentVisible, setContentVisible] = useState(true);
   const navItemRefs = useRef<(HTMLDivElement | null)[]>([]);
 
-  // ── Content fade state ───────────────────────────────────────────────────────
-  // contentVisible flips to false the INSTANT a scroll starts a transition
-  // (not when it ends), so the text fades out immediately instead of sitting
-  // frozen through the whole camera scrub and then hard-snapping.
-  const [contentVisible, setContentVisible] = useState(true);
-
-  // ── Pill position — measure real DOM positions ───────────────────────────────
+  // ── Pill position ─────────────────────────────────────────────────────────
   useEffect(() => {
-    // navIdx: loop 0 & 1 → item 0 (Origin), loop 2 → item 1, etc.
-    const navIdx = activeLoopIdx <= 1 ? 0 : activeLoopIdx - 1;
+    const navIdx  = activeLoopIdx <= 1 ? 0 : activeLoopIdx - 1;
     const navWrap = navItemRefs.current[0]?.parentElement;
-    const item = navItemRefs.current[navIdx];
+    const item    = navItemRefs.current[navIdx];
     if (!navWrap || !item) return;
-    const wrapTop = navWrap.getBoundingClientRect().top;
+    const wrapTop  = navWrap.getBoundingClientRect().top;
     const itemRect = item.getBoundingClientRect();
-    // Center of item relative to the nav wrapper
     setPillTop(itemRect.top - wrapTop + itemRect.height / 2);
   }, [activeLoopIdx]);
 
-  // ── WebGL helpers ───────────────────────────────────────────────────────────
+  // ── WebGL helpers ─────────────────────────────────────────────────────────
   const blit = useCallback((fbo: WebGLFramebuffer | null, w: number, h: number) => {
     const gl = glRef.current!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
@@ -373,107 +342,89 @@ export default function VideoScrollExperience({
     gl.bindTexture(gl.TEXTURE_2D, tex);
   }, []);
 
-  // ── Fluid sim step ──────────────────────────────────────────────────────────
+  // ── Fluid sim ─────────────────────────────────────────────────────────────
   const fluidStep = useCallback((dt: number) => {
-    const gl = glRef.current!;
+    const gl  = glRef.current!;
     const vel = velocityRef.current!;
     const prs = pressureRef.current!;
     const div = divergenceRef.current!;
     const cur = curlFBORef.current!;
-    const S = SIM_RES;
+    const S   = SIM_RES;
 
     gl.useProgram(progCurlRef.current!.prog);
-    gl.uniform2f(progCurlRef.current!.uniforms.texelSize, 1 / S, 1 / S);
+    gl.uniform2f(progCurlRef.current!.uniforms.texelSize, 1/S, 1/S);
     bindTex(0, vel.read.texture);
     gl.uniform1i(progCurlRef.current!.uniforms.uVelocity, 0);
     blit(cur.fbo, S, S);
 
     gl.useProgram(progVorticityRef.current!.prog);
-    gl.uniform2f(progVorticityRef.current!.uniforms.texelSize, 1 / S, 1 / S);
-    bindTex(0, vel.read.texture);
-    gl.uniform1i(progVorticityRef.current!.uniforms.uVelocity, 0);
-    bindTex(1, cur.texture);
-    gl.uniform1i(progVorticityRef.current!.uniforms.uCurl, 1);
+    gl.uniform2f(progVorticityRef.current!.uniforms.texelSize, 1/S, 1/S);
+    bindTex(0, vel.read.texture); gl.uniform1i(progVorticityRef.current!.uniforms.uVelocity, 0);
+    bindTex(1, cur.texture);      gl.uniform1i(progVorticityRef.current!.uniforms.uCurl, 1);
     gl.uniform1f(progVorticityRef.current!.uniforms.curl, CURL_AMOUNT);
     gl.uniform1f(progVorticityRef.current!.uniforms.dt, dt);
-    blit(vel.write.fbo, S, S);
-    vel.swap();
+    blit(vel.write.fbo, S, S); vel.swap();
 
     gl.useProgram(progDivRef.current!.prog);
-    gl.uniform2f(progDivRef.current!.uniforms.texelSize, 1 / S, 1 / S);
-    bindTex(0, vel.read.texture);
-    gl.uniform1i(progDivRef.current!.uniforms.uVelocity, 0);
+    gl.uniform2f(progDivRef.current!.uniforms.texelSize, 1/S, 1/S);
+    bindTex(0, vel.read.texture); gl.uniform1i(progDivRef.current!.uniforms.uVelocity, 0);
     blit(div.fbo, S, S);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, prs.read.fbo);
-    gl.viewport(0, 0, S, S);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.viewport(0, 0, S, S); gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(progPressureRef.current!.prog);
-    gl.uniform2f(progPressureRef.current!.uniforms.texelSize, 1 / S, 1 / S);
-    bindTex(1, div.texture);
-    gl.uniform1i(progPressureRef.current!.uniforms.uDivergence, 1);
+    gl.uniform2f(progPressureRef.current!.uniforms.texelSize, 1/S, 1/S);
+    bindTex(1, div.texture); gl.uniform1i(progPressureRef.current!.uniforms.uDivergence, 1);
     for (let i = 0; i < PRESSURE_ITER; i++) {
-      bindTex(0, prs.read.texture);
-      gl.uniform1i(progPressureRef.current!.uniforms.uPressure, 0);
-      blit(prs.write.fbo, S, S);
-      prs.swap();
+      bindTex(0, prs.read.texture); gl.uniform1i(progPressureRef.current!.uniforms.uPressure, 0);
+      blit(prs.write.fbo, S, S); prs.swap();
     }
 
     gl.useProgram(progGradSubRef.current!.prog);
-    gl.uniform2f(progGradSubRef.current!.uniforms.texelSize, 1 / S, 1 / S);
-    bindTex(0, prs.read.texture);
-    gl.uniform1i(progGradSubRef.current!.uniforms.uPressure, 0);
-    bindTex(1, vel.read.texture);
-    gl.uniform1i(progGradSubRef.current!.uniforms.uVelocity, 1);
-    blit(vel.write.fbo, S, S);
-    vel.swap();
+    gl.uniform2f(progGradSubRef.current!.uniforms.texelSize, 1/S, 1/S);
+    bindTex(0, prs.read.texture); gl.uniform1i(progGradSubRef.current!.uniforms.uPressure, 0);
+    bindTex(1, vel.read.texture); gl.uniform1i(progGradSubRef.current!.uniforms.uVelocity, 1);
+    blit(vel.write.fbo, S, S); vel.swap();
 
     gl.useProgram(progAdvectRef.current!.prog);
-    gl.uniform2f(progAdvectRef.current!.uniforms.texelSize, 1 / S, 1 / S);
+    gl.uniform2f(progAdvectRef.current!.uniforms.texelSize, 1/S, 1/S);
     gl.uniform1f(progAdvectRef.current!.uniforms.dt, dt);
     gl.uniform1f(progAdvectRef.current!.uniforms.dissipation, VELOCITY_DISS);
-    bindTex(0, vel.read.texture);
-    gl.uniform1i(progAdvectRef.current!.uniforms.uVelocity, 0);
-    bindTex(1, vel.read.texture);
-    gl.uniform1i(progAdvectRef.current!.uniforms.uSource, 1);
-    blit(vel.write.fbo, S, S);
-    vel.swap();
+    bindTex(0, vel.read.texture); gl.uniform1i(progAdvectRef.current!.uniforms.uVelocity, 0);
+    bindTex(1, vel.read.texture); gl.uniform1i(progAdvectRef.current!.uniforms.uSource, 1);
+    blit(vel.write.fbo, S, S); vel.swap();
   }, [blit, bindTex]);
 
   const splat = useCallback((x: number, y: number, dx: number, dy: number) => {
-    const gl = glRef.current;
-    if (!gl) return;
-    const vel = velocityRef.current;
-    if (!vel) return;
-    const S = SIM_RES;
+    const gl  = glRef.current;  if (!gl) return;
+    const vel = velocityRef.current; if (!vel) return;
+    const S   = SIM_RES;
     gl.useProgram(progSplatRef.current!.prog);
-    gl.uniform2f(progSplatRef.current!.uniforms.texelSize, 1 / S, 1 / S);
+    gl.uniform2f(progSplatRef.current!.uniforms.texelSize, 1/S, 1/S);
     bindTex(0, vel.read.texture);
     gl.uniform1i(progSplatRef.current!.uniforms.uTarget, 0);
     gl.uniform1f(progSplatRef.current!.uniforms.aspectRatio, gl.canvas.width / gl.canvas.height);
     gl.uniform2f(progSplatRef.current!.uniforms.point, x, y);
     gl.uniform2f(progSplatRef.current!.uniforms.velocity, dx * SPLAT_FORCE, dy * SPLAT_FORCE);
     gl.uniform1f(progSplatRef.current!.uniforms.radius, SPLAT_RADIUS / 100);
-    blit(vel.write.fbo, S, S);
-    vel.swap();
+    blit(vel.write.fbo, S, S); vel.swap();
   }, [blit, bindTex]);
 
-  // ── WebGL init ──────────────────────────────────────────────────────────────
+  // ── WebGL init ────────────────────────────────────────────────────────────
   const initWebGL = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const canvas = canvasRef.current; if (!canvas) return;
     const gl = canvas.getContext("webgl", {
       alpha: false, antialias: false, depth: false, stencil: false,
     }) as WebGLRenderingContext;
     if (!gl) return;
     glRef.current = gl;
 
-    const hfExt = gl.getExtension("OES_texture_half_float");
+    const hfExt    = gl.getExtension("OES_texture_half_float");
     gl.getExtension("OES_texture_half_float_linear");
     const halfFloat = hfExt ? hfExt.HALF_FLOAT_OES : gl.UNSIGNED_BYTE;
 
     gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
 
     const initProg = (frag: string) => {
       const p = makeProgram(gl, BASE_VERT, frag);
@@ -484,13 +435,13 @@ export default function VideoScrollExperience({
       return p;
     };
 
-    progSplatRef.current = initProg(SPLAT_FRAG);
-    progAdvectRef.current = initProg(ADVECT_FRAG);
-    progCurlRef.current = initProg(CURL_FRAG);
+    progSplatRef.current     = initProg(SPLAT_FRAG);
+    progAdvectRef.current    = initProg(ADVECT_FRAG);
+    progCurlRef.current      = initProg(CURL_FRAG);
     progVorticityRef.current = initProg(VORTICITY_FRAG);
-    progDivRef.current = initProg(DIVERGENCE_FRAG);
-    progPressureRef.current = initProg(PRESSURE_FRAG);
-    progGradSubRef.current = initProg(GRAD_SUB_FRAG);
+    progDivRef.current       = initProg(DIVERGENCE_FRAG);
+    progPressureRef.current  = initProg(PRESSURE_FRAG);
+    progGradSubRef.current   = initProg(GRAD_SUB_FRAG);
 
     const comp = makeProgram(gl, COMPOSITE_VERT, COMPOSITE_FRAG);
     gl.useProgram(comp.prog);
@@ -498,17 +449,17 @@ export default function VideoScrollExperience({
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
     gl.uniform1f(comp.uniforms.uDispStrength, DISP_STRENGTH);
-    gl.uniform1i(comp.uniforms.tFrame, 0);
+    gl.uniform1i(comp.uniforms.tFrame,    0);
     gl.uniform1i(comp.uniforms.tVelocity, 1);
-    gl.uniform1f(comp.uniforms.uZoom, ZOOM);
-    gl.uniform1i(comp.uniforms.tPrev, 2);
+    gl.uniform1f(comp.uniforms.uZoom,     ZOOM);
+    gl.uniform1i(comp.uniforms.tPrev,     2);
     progCompositeRef.current = comp;
 
     const S = SIM_RES;
-    velocityRef.current = new DoubleFBO(gl, S, S, halfFloat);
-    pressureRef.current = new DoubleFBO(gl, S, S, halfFloat);
+    velocityRef.current   = new DoubleFBO(gl, S, S, halfFloat);
+    pressureRef.current   = new DoubleFBO(gl, S, S, halfFloat);
     divergenceRef.current = new SingleFBO(gl, S, S, halfFloat);
-    curlFBORef.current = new SingleFBO(gl, S, S, halfFloat);
+    curlFBORef.current    = new SingleFBO(gl, S, S, halfFloat);
 
     frameTextures.current = Array.from({ length: frameCount }, () => {
       const t = gl.createTexture()!;
@@ -522,106 +473,76 @@ export default function VideoScrollExperience({
     textureReady.current = new Array(frameCount).fill(false);
   }, [frameCount]);
 
-  // ── Texture window management ───────────────────────────────────────────────
+  // ── Texture window management ─────────────────────────────────────────────
   const getWindow = useCallback((center: number, dir: number) => {
     const behind = dir >= 0 ? WINDOW_BEHIND : WINDOW_AHEAD;
-    const ahead = dir >= 0 ? WINDOW_AHEAD : WINDOW_BEHIND;
+    const ahead  = dir >= 0 ? WINDOW_AHEAD  : WINDOW_BEHIND;
     return {
       lo: Math.max(0, center - behind),
       hi: Math.min(frameCount - 1, center + ahead),
     };
   }, [frameCount]);
 
-const evictOutOfWindow = useCallback((lo: number, hi: number) => {
-  const gl = glRef.current;
-  if (!gl) return;
+  const evictOutOfWindow = useCallback((lo: number, hi: number) => {
+    const gl = glRef.current; if (!gl) return;
+    for (let i = 0; i < frameCount; i++) {
+      if (i >= lo && i <= hi) continue;
+      const ctrl = abortMap.current.get(i);
+      if (ctrl) { ctrl.abort(); abortMap.current.delete(i); loadingSet.current.delete(i); }
+      if (!textureReady.current[i]) continue;
+      gl.deleteTexture(frameTextures.current[i]);
+      const t = gl.createTexture()!;
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      frameTextures.current[i] = t;
+      textureReady.current[i]  = false;
+    }
+  }, [frameCount]);
 
-  for (let i = 0; i < frameCount; i++) {
-    if (i >= lo && i <= hi) continue;
+  // ── fetchFrame: bitmap-cache fast path + CDN slow path ───────────────────
+  const fetchFrame = useCallback(async (i: number) => {
+    if (textureReady.current[i] || loadingSet.current.has(i)) return;
 
-    // Cancel any in-flight fetch so we don't waste bandwidth on frames
-    // we're about to move away from.
-    const controller = abortMap.current.get(i);
-    if (controller) {
-      controller.abort();
-      abortMap.current.delete(i);
+    // Fast path — bitmap already decoded this session, just re-upload to GPU
+    if (BITMAP_CACHE.has(i)) {
+      const gl = glRef.current; if (!gl) return;
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, frameTextures.current[i]);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, BITMAP_CACHE.get(i)!);
+      textureReady.current[i] = true;
+      return;
+    }
+
+    // Slow path — fetch, decode, cache bitmap, upload to GPU
+    loadingSet.current.add(i);
+    const controller = new AbortController();
+    abortMap.current.set(i, controller);
+    try {
+      const n    = (i + 1).toString().padStart(4, "0");
+      const resp = await fetch(`${folderPath}/frame_${n}.${extension}`, {
+        signal: controller.signal, cache: "force-cache",
+      });
+      if (!resp.ok) return;
+      const bitmap = await createImageBitmap(await resp.blob(), {
+        resizeQuality: "medium", premultiplyAlpha: "none", colorSpaceConversion: "none",
+      });
+      BITMAP_CACHE.set(i, bitmap);
+      const gl = glRef.current;
+      if (!gl || controller.signal.aborted) return;
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, frameTextures.current[i]);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+      textureReady.current[i] = true;
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name !== "AbortError") console.warn(`frame ${i} failed`, err);
+    } finally {
       loadingSet.current.delete(i);
+      abortMap.current.delete(i);
     }
-
-    if (!textureReady.current[i]) continue;
-
-    // Free GPU memory for this slot — but the decoded ImageBitmap stays
-    // alive in BITMAP_CACHE so re-entering this frame costs zero network.
-    gl.deleteTexture(frameTextures.current[i]);
-    const t = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, t);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    frameTextures.current[i] = t;
-    textureReady.current[i]  = false;
-  }
-}, [frameCount]);
-
-const fetchFrame = useCallback(async (i: number) => {
-  if (textureReady.current[i] || loadingSet.current.has(i)) return;
-
-  // ── Fast path: bitmap already decoded this session, just re-upload ────────
-  if (BITMAP_CACHE.has(i)) {
-    const gl = glRef.current;
-    if (!gl) return;
-    const bitmap = BITMAP_CACHE.get(i)!;
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, frameTextures.current[i]);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
-    textureReady.current[i] = true;
-    return;
-  }
-
-  // ── Slow path: fetch from CDN, decode, cache, upload ─────────────────────
-  loadingSet.current.add(i);
-  const controller = new AbortController();
-  abortMap.current.set(i, controller);
-
-  try {
-    const n      = (i + 1).toString().padStart(4, "0");
-    const url    = `${folderPath}/frame_${n}.${extension}`;
-    const resp   = await fetch(url, {
-      signal: controller.signal,
-      cache:  "force-cache", // browser cache on revisit
-    });
-
-    if (!resp.ok) return;
-
-    const blob   = await resp.blob();
-    const bitmap = await createImageBitmap(blob, {
-      resizeQuality:        "medium",
-      premultiplyAlpha:     "none",
-      colorSpaceConversion: "none", // skip sRGB round-trip, WebGL handles it
-    });
-
-    // Store decoded bitmap — do NOT close() it here.
-    // If this frame gets evicted from the GPU window later, re-upload
-    // costs zero network and zero decode time.
-    BITMAP_CACHE.set(i, bitmap);
-
-    const gl = glRef.current;
-    if (!gl || controller.signal.aborted) return; // bitmap stays in cache
-
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, frameTextures.current[i]);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
-    textureReady.current[i] = true;
-  } catch (err: unknown) {
-    if (err instanceof Error && err.name !== "AbortError") {
-      console.warn(`frame ${i} failed`, err);
-    }
-  } finally {
-    loadingSet.current.delete(i);
-    abortMap.current.delete(i);
-  }
-}, [folderPath, extension]);
+  }, [folderPath, extension]);
 
   const updateWindow = useCallback(async (center: number, dir: number) => {
     const { lo, hi } = getWindow(center, dir);
@@ -635,74 +556,133 @@ const fetchFrame = useCallback(async (i: number) => {
       await Promise.all(needed.slice(b, b + FETCH_BATCH).map(fetchFrame));
   }, [getWindow, evictOutOfWindow, fetchFrame]);
 
-  // ── Initial load ─────────────────────────────────────────────────────────────
-const preloadFrames = useCallback(async () => {
-  // ── Phase 1: load only loop 0 frames so playback starts immediately ───────
-  // Loop 0 is frames 10–48. Load frame 0 first for the very first render,
-  // then the loop range, then show the experience.
-  const phase1 = [0];
-  for (let i = LOOPS[0].start; i <= LOOPS[0].end; i++) phase1.push(i);
+  // ── Progressive background caching ───────────────────────────────────────
+  // Called whenever the active loop changes. Queues:
+  //   1. The next loop's frames (so the destination is ready)
+  //   2. The inter-loop transition frames between current end → next start
+  //      (so scrubbing into the transition never stutters)
+  // Does nothing if already cached up to this loop or a job is running.
+  const triggerNextLoopCache = useCallback(async (loopIdx: number) => {
+    const nextIdx = loopIdx + 1;
+    if (nextIdx >= LOOPS.length)          return; // already at last loop
+    if (cachedUpToLoopRef.current >= nextIdx) return; // already done
+    if (bgCachingRef.current)             return; // job already running
 
-  let done = 0;
-  for (let b = 0; b < phase1.length; b += FETCH_BATCH) {
-    await Promise.all(
-      phase1.slice(b, b + FETCH_BATCH).map((i) =>
-        fetchFrame(i).then(() => {
-          done++;
-          setLoadPct(Math.round((done / phase1.length) * 100));
-        }),
-      ),
-    );
-  }
+    bgCachingRef.current = true;
+    cachedUpToLoopRef.current = nextIdx;
 
-  // ── Ready: show the experience now, background-load everything else ───────
-  setLoaded(true);
-  readyRef.current = true;
+    try {
+      const currentLoop = LOOPS[loopIdx];
+      const nextLoop    = LOOPS[nextIdx];
 
-  // ── Phase 2: all remaining loop ranges so transitions never stutter ───────
-  const loopFrames: number[] = [];
-  for (const loop of LOOPS) {
-    for (let i = loop.start; i <= loop.end; i++) {
-      if (!textureReady.current[i]) loopFrames.push(i);
+      // 1. Inter-loop transition frames (current.end → next.start)
+      const interFrames: number[] = [];
+      for (let i = currentLoop.end + 1; i < nextLoop.start; i++) {
+        if (!BITMAP_CACHE.has(i) && !textureReady.current[i]) interFrames.push(i);
+      }
+      for (let b = 0; b < interFrames.length; b += INTERLOOP_PREFETCH_BATCH) {
+        if (!readyRef.current) break;
+        await Promise.all(interFrames.slice(b, b + INTERLOOP_PREFETCH_BATCH).map(fetchFrame));
+        // Yield a frame between batches so we don't starve the render loop
+        await new Promise((r) => setTimeout(r, 0));
+      }
+
+      // 2. Next loop's own frames
+      const nextLoopFrames: number[] = [];
+      for (let i = nextLoop.start; i <= nextLoop.end; i++) {
+        if (!BITMAP_CACHE.has(i) && !textureReady.current[i]) nextLoopFrames.push(i);
+      }
+      for (let b = 0; b < nextLoopFrames.length; b += INTERLOOP_PREFETCH_BATCH) {
+        if (!readyRef.current) break;
+        await Promise.all(nextLoopFrames.slice(b, b + INTERLOOP_PREFETCH_BATCH).map(fetchFrame));
+        await new Promise((r) => setTimeout(r, 0));
+      }
+
+    } finally {
+      bgCachingRef.current = false;
     }
-  }
-  for (let b = 0; b < loopFrames.length; b += FETCH_BATCH) {
-    if (!readyRef.current) break;
-    await Promise.all(loopFrames.slice(b, b + FETCH_BATCH).map(fetchFrame));
-  }
+  }, [fetchFrame]);
 
-  // ── Phase 3: fill all inter-loop frames in order ──────────────────────────
-  const remaining: number[] = [];
-  for (let i = 0; i < frameCount; i++) {
-    if (!textureReady.current[i] && !BITMAP_CACHE.has(i)) remaining.push(i);
-  }
-  for (let b = 0; b < remaining.length; b += FETCH_BATCH) {
-    if (!readyRef.current) break;
-    await Promise.all(remaining.slice(b, b + FETCH_BATCH).map(fetchFrame));
-  }
+  // ── Initial load ──────────────────────────────────────────────────────────
+  // Phase 1 (blocking):  frame 0 + all Loop 0 frames → show experience
+  // Phase 2 (background): Loop 1 frames + inter-loop 0→1 frames
+  // Phase 3 (background): remaining loop frames in order
+  // Phase 4 (background): all remaining inter-loop frames
+  const preloadFrames = useCallback(async () => {
+    // ── Phase 1: Loop 0 only ─────────────────────────────────────────────
+    const phase1 = [0];
+    for (let i = LOOPS[0].start; i <= LOOPS[0].end; i++) phase1.push(i);
 
-  // ── Phase 4: trim bitmap cache to 600 frames max to protect RAM ──────────
-  trimBitmapCache(600);
-}, [frameCount, fetchFrame]);
+    let done = 0;
+    for (let b = 0; b < phase1.length; b += FETCH_BATCH) {
+      await Promise.all(
+        phase1.slice(b, b + FETCH_BATCH).map((i) =>
+          fetchFrame(i).then(() => {
+            done++;
+            setLoadPct(Math.round((done / phase1.length) * 100));
+          }),
+        ),
+      );
+    }
 
-  // ── Canvas resize ───────────────────────────────────────────────────────────
+    // ── Show the experience ───────────────────────────────────────────────
+    setLoaded(true);
+    readyRef.current = true;
+
+    // ── Phase 2: inter-loop 0→1 + Loop 1 frames ──────────────────────────
+    await triggerNextLoopCache(0);
+
+    // ── Phase 3: remaining loop ranges in sequence ────────────────────────
+    for (let li = 2; li < LOOPS.length; li++) {
+      if (!readyRef.current) break;
+      const loop = LOOPS[li];
+      const frames: number[] = [];
+      for (let i = loop.start; i <= loop.end; i++) {
+        if (!BITMAP_CACHE.has(i) && !textureReady.current[i]) frames.push(i);
+      }
+      for (let b = 0; b < frames.length; b += INTERLOOP_PREFETCH_BATCH) {
+        if (!readyRef.current) break;
+        await Promise.all(frames.slice(b, b + INTERLOOP_PREFETCH_BATCH).map(fetchFrame));
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
+
+    // ── Phase 4: inter-loop transition frames for all remaining gaps ──────
+    for (let li = 1; li < LOOPS.length; li++) {
+      if (!readyRef.current) break;
+      const from = LOOPS[li - 1].end + 1;
+      const to   = LOOPS[li].start;
+      const frames: number[] = [];
+      for (let i = from; i < to; i++) {
+        if (!BITMAP_CACHE.has(i) && !textureReady.current[i]) frames.push(i);
+      }
+      for (let b = 0; b < frames.length; b += INTERLOOP_PREFETCH_BATCH) {
+        if (!readyRef.current) break;
+        await Promise.all(frames.slice(b, b + INTERLOOP_PREFETCH_BATCH).map(fetchFrame));
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
+
+    trimBitmapCache(600);
+  }, [frameCount, fetchFrame, triggerNextLoopCache]);
+
+  // ── Canvas resize ─────────────────────────────────────────────────────────
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
-    const gl = glRef.current;
+    const gl     = glRef.current;
     if (!canvas || !gl) return;
     const dpr = Math.min(window.devicePixelRatio, 2);
-    canvas.width = window.innerWidth * dpr;
-    canvas.height = window.innerHeight * dpr;
-    canvas.style.width = window.innerWidth + "px";
+    canvas.width        = window.innerWidth  * dpr;
+    canvas.height       = window.innerHeight * dpr;
+    canvas.style.width  = window.innerWidth  + "px";
     canvas.style.height = window.innerHeight + "px";
   }, []);
 
-  // ── Render loop ─────────────────────────────────────────────────────────────
+  // ── Render loop ───────────────────────────────────────────────────────────
   const startRenderLoop = useCallback(() => {
-    const gl = glRef.current;
-    if (!gl) return;
+    const gl = glRef.current; if (!gl) return;
     let running = true;
-    let lastT = 0;
+    let lastT   = 0;
     let dbgTick = 0;
 
     const paint = (t: number) => {
@@ -711,115 +691,101 @@ const preloadFrames = useCallback(async () => {
       lastT = t;
 
       if (readyRef.current) {
-        const f = frameFloatRef.current;
+        const f         = frameFloatRef.current;
         const inLoopIdx = LOOPS.findIndex((l) => f >= l.start && f <= l.end);
 
         blendRef.current = Math.min(1.0, blendRef.current + dt * 6);
 
         if (isTransitioningRef.current) {
-          // ── TRANSITION MODE: ease-in-out at TRANSITION_FPS ──────────────
-          const total = transitionTotalRef.current;
+          // ── TRANSITION: eased scrub at TRANSITION_FPS ─────────────────
+          const total   = transitionTotalRef.current;
           const covered = transitionCoveredRef.current;
-          const tDir = transitionDirRef.current;
+          const tDir    = transitionDirRef.current;
 
-          // Compute eased step for this frame
-          const p0 = covered / total;
-          const p1 = Math.min((covered + TRANSITION_FPS * dt) / total, 1.0);
+          const p0    = covered / total;
+          const p1    = Math.min((covered + TRANSITION_FPS * dt) / total, 1.0);
           const eased = (easeInOut(p1) - easeInOut(p0)) * total;
 
-          frameFloatRef.current += tDir * eased;
-          transitionCoveredRef.current = covered + TRANSITION_FPS * dt;
+          frameFloatRef.current        += tDir * eased;
+          transitionCoveredRef.current  = covered + TRANSITION_FPS * dt;
+          frameFloatRef.current         = Math.max(0, Math.min(frameCount - 1, frameFloatRef.current));
 
-          // Clamp to bounds
-          frameFloatRef.current = Math.max(0, Math.min(frameCount - 1, frameFloatRef.current));
-
-          const newLoopIdx = LOOPS.findIndex(
-            (l) => frameFloatRef.current >= l.start && frameFloatRef.current <= l.end,
-          );
-
-          // Arrived at a new loop or hit boundary → end transition
-          const hitBoundary =
-            frameFloatRef.current <= 0 || frameFloatRef.current >= frameCount - 1;
-          const arrivedAtLoop =
-            newLoopIdx >= 0 && newLoopIdx !== currentLoopRef.current;
+          const newLoopIdx    = LOOPS.findIndex((l) => frameFloatRef.current >= l.start && frameFloatRef.current <= l.end);
+          const hitBoundary   = frameFloatRef.current <= 0 || frameFloatRef.current >= frameCount - 1;
+          const arrivedAtLoop = newLoopIdx >= 0 && newLoopIdx !== currentLoopRef.current;
 
           if (arrivedAtLoop || hitBoundary || transitionCoveredRef.current >= total) {
-            // Snap into loop if we landed in one
             if (arrivedAtLoop) {
               currentLoopRef.current = newLoopIdx;
-              loopPlayDirRef.current = 1; // always arrive at loop.start, play forward
+              loopPlayDirRef.current = 1; // always start forward on arrival
             }
             isTransitioningRef.current = false;
-            directionRef.current = 0;
-            // Camera has arrived — fade the new loop's content back in now,
-            // not after some extra delay.
+            directionRef.current       = 0;
             setContentVisible(true);
           }
+
         } else {
-          // ── LOOP / AUTOPLAY MODE at SOURCE_FPS, ping-pong inside the loop ──
-          // Instead of jumping end→start (the hard cut you were seeing), we
-          // reverse direction at each edge. Frame `end` and frame `start`
-          // are each only ever approached and reversed away from — never cut.
+          // ── LOOP AUTOPLAY: ping-pong between loop.start and loop.end ──
           if (inLoopIdx >= 0) {
             if (currentLoopRef.current !== inLoopIdx) {
               currentLoopRef.current = inLoopIdx;
               loopPlayDirRef.current = 1;
             }
+
             const loop = LOOPS[inLoopIdx];
-            const pd = loopPlayDirRef.current;
+            const pd   = loopPlayDirRef.current;
             frameFloatRef.current += dt * SOURCE_FPS * pd;
 
             if (pd === 1 && frameFloatRef.current >= loop.end) {
-              const overshoot = frameFloatRef.current - loop.end;
-              frameFloatRef.current = loop.end - overshoot;
+              frameFloatRef.current  = loop.end - (frameFloatRef.current - loop.end);
               loopPlayDirRef.current = -1;
             } else if (pd === -1 && frameFloatRef.current <= loop.start) {
-              const overshoot = loop.start - frameFloatRef.current;
-              frameFloatRef.current = loop.start + overshoot;
+              frameFloatRef.current  = loop.start + (loop.start - frameFloatRef.current);
               loopPlayDirRef.current = 1;
             }
+
           } else {
-            // Between loops: autoplay forward at SOURCE_FPS
+            // Between loops: autoplay forward
             frameFloatRef.current += dt * SOURCE_FPS;
-            if (frameFloatRef.current >= frameCount - 1)
-              frameFloatRef.current = frameCount - 1;
+            if (frameFloatRef.current >= frameCount - 1) frameFloatRef.current = frameCount - 1;
           }
         }
 
-        if (inLoopIdx >= 0) setActiveLoopIdx(inLoopIdx);
+        if (inLoopIdx >= 0) {
+          setActiveLoopIdx(inLoopIdx);
+          // Trigger background caching for the next loop whenever we
+          // settle into a new loop (no-ops if already queued or running)
+          if (!bgCachingRef.current && cachedUpToLoopRef.current < inLoopIdx + 1) {
+            triggerNextLoopCache(inLoopIdx);
+          }
+        }
 
-   dbgTick++;
+        dbgTick++;
 
-// Full window update every 10 ticks (eviction + broad fetch)
-if (dbgTick % 10 === 0) {
-  const windowDir = isTransitioningRef.current
-    ? directionRef.current
-    : loopPlayDirRef.current;
-  updateWindow(Math.floor(frameFloatRef.current), windowDir);
-}
+        // Full sliding-window update every 10 ticks
+        if (dbgTick % 10 === 0) {
+          const windowDir = isTransitioningRef.current ? directionRef.current : loopPlayDirRef.current;
+          updateWindow(Math.floor(frameFloatRef.current), windowDir);
+        }
 
-// Tight lookahead every single tick during transitions —
-// grabs the next 30 frames in the direction of travel immediately
-if (isTransitioningRef.current) {
-  const cur = Math.floor(frameFloatRef.current);
-  const dir = transitionDirRef.current;
-  const lookahead: number[] = [];
-  for (let i = 1; i <= 30; i++) {
-    const idx = cur + dir * i;
-    if (idx >= 0 && idx < frameCount && !textureReady.current[idx]) {
-      lookahead.push(idx);
-    }
-  }
-  if (lookahead.length > 0) {
-    Promise.all(lookahead.map(fetchFrame));
-  }
-}
+        // Tight lookahead every tick during transitions
+        if (isTransitioningRef.current) {
+          const cur = Math.floor(frameFloatRef.current);
+          const dir = transitionDirRef.current;
+          const lookahead: number[] = [];
+          for (let i = 1; i <= 30; i++) {
+            const idx = cur + dir * i;
+            if (idx >= 0 && idx < frameCount && !textureReady.current[idx]) lookahead.push(idx);
+          }
+          if (lookahead.length > 0) Promise.all(lookahead.map(fetchFrame));
+        }
+
         if (dbgTick % 6 === 0) {
           setDebugFrame(Math.floor(frameFloatRef.current));
           const phase = isTransitioningRef.current
             ? `TRANSITION ${transitionDirRef.current > 0 ? "FWD" : "REV"} ${Math.round((transitionCoveredRef.current / transitionTotalRef.current) * 100)}%`
             : inLoopIdx >= 0
-              ? `LOOP_${inLoopIdx} ${loopPlayDirRef.current > 0 ? "▶" : "◀"}`
+              ? `LOOP_${inLoopIdx} ${loopPlayDirRef.current > 0 ? "▶" : "◀"}  cache→${cachedUpToLoopRef.current}`
               : "AUTOPLAY";
           setDebugPhase(phase);
         }
@@ -857,76 +823,60 @@ if (isTransitioningRef.current) {
 
     requestAnimationFrame((t) => { lastT = t; requestAnimationFrame(paint); });
     return () => { running = false; };
-  }, [frameCount, fluidStep, updateWindow]);
+  }, [frameCount, fluidStep, updateWindow, fetchFrame, triggerNextLoopCache]);
 
-  // ── Scroll handler ──────────────────────────────────────────────────────────
-const handleScroll = useCallback((e: WheelEvent) => {
-  if (isTransitioningRef.current) return;
+  // ── Scroll handler ────────────────────────────────────────────────────────
+  const handleScroll = useCallback((e: WheelEvent) => {
+    if (isTransitioningRef.current) return;
+    scrollAccRef.current += e.deltaY;
+    if (Math.abs(scrollAccRef.current) < SCROLL_THRESHOLD) return;
+    const scrollDir = scrollAccRef.current > 0 ? 1 : -1;
+    scrollAccRef.current = 0;
 
-  scrollAccRef.current += e.deltaY;
-  if (Math.abs(scrollAccRef.current) < SCROLL_THRESHOLD) return;
-  const scrollDir = scrollAccRef.current > 0 ? 1 : -1;
-  scrollAccRef.current = 0;
+    const f = frameFloatRef.current;
 
-  const f = frameFloatRef.current;
+    if (scrollDir === 1 && f < frameCount - 1) {
+      const nextLoop    = LOOPS.find((l) => l.start > f);
+      const targetFrame = nextLoop ? nextLoop.start : frameCount - 1;
+      const distance    = targetFrame - f;
 
-  if (scrollDir === 1 && f < frameCount - 1) {
-    const nextLoop    = LOOPS.find((l) => l.start > f);
-    const targetFrame = nextLoop ? nextLoop.start : frameCount - 1;
-    const distance    = targetFrame - f;
+      isTransitioningRef.current   = true;
+      transitionDirRef.current     = 1;
+      transitionTotalRef.current   = distance;
+      transitionCoveredRef.current = 0;
+      directionRef.current         = 1;
+      setContentVisible(false);
 
-    isTransitioningRef.current   = true;
-    transitionDirRef.current     = 1;
-    transitionTotalRef.current   = distance;
-    transitionCoveredRef.current = 0;
-    directionRef.current         = 1;
-    setContentVisible(false);
+      // Speculative prefetch for the entire path
+      const end = Math.min(frameCount - 1, Math.ceil(f + distance + WINDOW_AHEAD));
+      const ahead: number[] = [];
+      for (let i = Math.floor(f); i <= end; i++) ahead.push(i);
+      for (let b = 0; b < ahead.length; b += 32) Promise.all(ahead.slice(b, b + 32).map(fetchFrame));
 
-    // ── Speculative prefetch: don't wait for the render loop's 10-tick
-    // window update. Fire fetches for the entire path + lookahead NOW,
-    // 16 at a time (CDN handles parallel fine). Already-cached frames
-    // return instantly from BITMAP_CACHE so no wasted work.
-    const speculativeEnd = Math.min(
-      frameCount - 1,
-      Math.ceil(f + distance + WINDOW_AHEAD),
-    );
-    const ahead: number[] = [];
-    for (let i = Math.floor(f); i <= speculativeEnd; i++) ahead.push(i);
-    for (let b = 0; b < ahead.length; b += 32) {
-      Promise.all(ahead.slice(b, b + 32).map(fetchFrame));
+    } else if (scrollDir === -1 && f > 0) {
+      const prevLoop    = [...LOOPS].reverse().find((l) => l.end < f);
+      const targetFrame = prevLoop ? prevLoop.start : 0;
+      const distance    = f - targetFrame;
+
+      isTransitioningRef.current   = true;
+      transitionDirRef.current     = -1;
+      transitionTotalRef.current   = distance;
+      transitionCoveredRef.current = 0;
+      directionRef.current         = -1;
+      setContentVisible(false);
+
+      const start = Math.max(0, Math.floor(f - distance - WINDOW_AHEAD));
+      const behind: number[] = [];
+      for (let i = Math.ceil(f); i >= start; i--) behind.push(i);
+      for (let b = 0; b < behind.length; b += 32) Promise.all(behind.slice(b, b + 32).map(fetchFrame));
     }
+  }, [frameCount, fetchFrame]);
 
-  } else if (scrollDir === -1 && f > 0) {
-    const prevLoop    = [...LOOPS].reverse().find((l) => l.end < f);
-    const targetFrame = prevLoop ? prevLoop.start : 0;
-    const distance    = f - targetFrame;
-
-    isTransitioningRef.current   = true;
-    transitionDirRef.current     = -1;
-    transitionTotalRef.current   = distance;
-    transitionCoveredRef.current = 0;
-    directionRef.current         = -1;
-    setContentVisible(false);
-
-    // ── Speculative prefetch backward ─────────────────────────────────────
-    const speculativeStart = Math.max(
-      0,
-      Math.floor(f - distance - WINDOW_AHEAD),
-    );
-    const behind: number[] = [];
-    for (let i = Math.ceil(f); i >= speculativeStart; i--) behind.push(i);
-    for (let b = 0; b < behind.length; b += 32) {
-      Promise.all(behind.slice(b, b + 32).map(fetchFrame));
-    }
-  }
-}, [frameCount, fetchFrame]);
-
-  // ── Mouse handler ───────────────────────────────────────────────────────────
+  // ── Mouse handler ─────────────────────────────────────────────────────────
   const handleMouseMove = useCallback((e: MouseEvent) => {
-    const rect = wrapperRef.current?.getBoundingClientRect();
-    if (!rect) return;
+    const rect = wrapperRef.current?.getBoundingClientRect(); if (!rect) return;
     const nx = (e.clientX - rect.left) / rect.width;
-    const ny = (e.clientY - rect.top) / rect.height;
+    const ny = (e.clientY - rect.top)  / rect.height;
     const dx = nx - prevMouseRef.current.x;
     const dy = ny - prevMouseRef.current.y;
     prevMouseRef.current = { x: nx, y: ny };
@@ -934,7 +884,7 @@ const handleScroll = useCallback((e: WheelEvent) => {
     if (Math.hypot(dx, dy) > 0.0005) splat(nx, ny, dx, dy);
   }, [splat]);
 
-  // ── Mount / unmount ─────────────────────────────────────────────────────────
+  // ── Mount / unmount ───────────────────────────────────────────────────────
   useEffect(() => {
     let stopRender: (() => void) | undefined;
     const init = async () => {
@@ -958,226 +908,104 @@ const handleScroll = useCallback((e: WheelEvent) => {
     };
   }, [initWebGL, resizeCanvas, preloadFrames, startRenderLoop, handleMouseMove, handleScroll]);
 
-  // ── Render ──────────────────────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <>
       <style>{`
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
         .mu-header {
-          position: fixed;
-          top: 40px; left: 0; right: 0;
-          z-index: 50;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 0 clamp(16px, 3vw, 40px);
-          height: 56px;
+          position: fixed; top: 40px; left: 0; right: 0; z-index: 50;
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 0 clamp(16px, 3vw, 40px); height: 56px;
         }
-        .mu-header-left {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
+        .mu-header-left { display: flex; align-items: center; gap: 12px; }
         .mu-logo-mark {
-          width: 112px;
-          height: 48px;
-          border-radius: 3px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
+          width: 112px; height: 48px; border-radius: 3px;
+          display: flex; align-items: center; justify-content: center;
         }
-        .mu-logo-mark span {
-          font-size: 18px;
-          color: #000;
-          letter-spacing: -0.03em;
-        }
-        .mu-logo-divider {
-          width: 1px;
-          height: 18px;
-          background: rgba(255,255,255,0.3);
-        }
+        .mu-logo-mark span { font-size: 18px; color: #000; letter-spacing: -0.03em; }
+        .mu-logo-divider { width: 1px; height: 18px; background: rgba(255,255,255,0.3); }
         .mu-logo-school {
           font-family: var(--font-geist-sans), sans-serif;
-          font-size: 16px;
-          font-weight: 600;
-          text-transform: uppercase;
+          font-size: 16px; font-weight: 600; text-transform: uppercase;
         }
-        .mu-header-right {
-          display: flex;
-          align-items: center;
-          gap: 16px;
-        }
+        .mu-header-right { display: flex; align-items: center; gap: 16px; }
         .mu-cta {
           font-family: var(--font-geist-sans), sans-serif;
-          font-size: 14px;
-          font-weight: 600;
-          color: #000;
-          background: #fff;
-          border: none;
-          border-radius: 3px;
-          padding: 8px 16px;
-          cursor: pointer;
-          white-space: nowrap;
+          font-size: 14px; font-weight: 600; color: #000; background: #fff;
+          border: none; border-radius: 3px; padding: 8px 16px; cursor: pointer; white-space: nowrap;
         }
         .mu-hamburger {
-          display: flex;
-          flex-direction: column;
-          gap: 5px;
-          cursor: pointer;
-          padding: 10px 8px;
-          background: rgba(255, 255, 255, 0.25);
-          backdrop-filter: blur(12px);
-          -webkit-backdrop-filter: blur(12px);
-          border: 1px solid rgba(255, 255, 255, 0.1);
-          border-radius: 4px;
-          box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+          display: flex; flex-direction: column; gap: 5px; cursor: pointer; padding: 10px 8px;
+          background: rgba(255,255,255,0.25); backdrop-filter: blur(12px);
+          -webkit-backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.1);
+          border-radius: 4px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);
         }
-        .mu-hamburger span {
-          display: block;
-          width: 22px;
-          height: 1.5px;
-          background: rgba(255,255,255,0.8);
-        }
+        .mu-hamburger span { display: block; width: 22px; height: 1.5px; background: rgba(255,255,255,0.8); }
 
         .mu-sidenav {
-          position: fixed;
-          left: 20px;
-          top: 50%;
-          transform: translateY(-50%);
-          z-index: 50;
-          display: flex;
-          flex-direction: row;
-          align-items: flex-start;
-          gap: 16px;
-          pointer-events: none;
+          position: fixed; left: 20px; top: 50%; transform: translateY(-50%);
+          z-index: 50; display: flex; flex-direction: row; align-items: flex-start;
+          gap: 16px; pointer-events: none;
         }
-
-        /* Track column */
-        .mu-sidenav-track-wrap {
-          position: relative;
-          width: 12px;
-          align-self: stretch;
-          flex-shrink: 0;
-        }
-        /* thin background line */
+        .mu-sidenav-track-wrap { position: relative; width: 12px; align-self: stretch; flex-shrink: 0; }
         .mu-sidenav-track {
-          position: absolute;
-          left: 50%;
-          top: 0; bottom: 0;
-          transform: translateX(-50%);
-          width: 2px;
-          background: rgba(255,255,255,0.2);
-          border-radius: 2px;
+          position: absolute; left: 50%; top: 0; bottom: 0; transform: translateX(-50%);
+          width: 2px; background: rgba(255,255,255,0.2); border-radius: 2px;
         }
-        /* pill / thumb that slides */
         .mu-sidenav-indicator {
-          position: absolute;
-          left: 50%;
-          transform: translateX(-50%);
-          width: 6px;
-          height: 40px;
-          border-radius: 999px;
-          background: rgba(255,255,255,0.85);
-          backdrop-filter: blur(4px);
-          transition: top 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-          margin-top: -20px;
+          position: absolute; left: 50%; transform: translateX(-50%);
+          width: 6px; height: 40px; border-radius: 999px;
+          background: rgba(255,255,255,0.85); backdrop-filter: blur(4px);
+          transition: top 0.4s cubic-bezier(0.4, 0, 0.2, 1); margin-top: -20px;
         }
-
-        /* Labels column */
-        .mu-sidenav-item {
-          display: flex;
-          align-items: center;
-          pointer-events: auto;
-        }
+        .mu-sidenav-item { display: flex; align-items: center; pointer-events: auto; }
         .mu-sidenav-label {
-          font-size: 14px;
-          font-weight: 600;
-          color: #000;
-          transition: background-color 0.3s, color 0.3s;
-          white-space: nowrap;
-          padding: 6px 12px;
-          background-color: rgba(255,255,255,0.45);
-          backdrop-filter: blur(6px);
-          -webkit-backdrop-filter: blur(6px);
-          border-radius: 4px;
-          cursor: pointer;
-          user-select: none;
+          font-size: 14px; font-weight: 600; color: #000;
+          transition: background-color 0.3s, color 0.3s; white-space: nowrap;
+          padding: 6px 12px; background-color: rgba(255,255,255,0.45);
+          backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+          border-radius: 4px; cursor: pointer; user-select: none;
         }
-        .mu-sidenav-item:hover .mu-sidenav-label {
-          background-color: rgba(255,255,255,0.7);
-          color: #000;
-        }
+        .mu-sidenav-item:hover .mu-sidenav-label { background-color: rgba(255,255,255,0.7); }
         .mu-sidenav-label.active {
-          color: #000;
-          background-color: #fff;
-          box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+          color: #000; background-color: #fff; box-shadow: 0 2px 12px rgba(0,0,0,0.15);
         }
-
         .mu-collab {
-          position: fixed;
-          right: 0;
-          top: 50%;
-          transform: translateY(-50%) rotate(90deg);
-          transform-origin: center center;
-          z-index: 50;
-          font-family: var(--font-geist-sans), sans-serif;
-          font-size: 0.6rem;
-          font-weight: 500;
-          letter-spacing: 0.2em;
-          text-transform: uppercase;
-          color: rgba(255,255,255,0.35);
-          white-space: nowrap;
-          pointer-events: none;
-          margin-right: -28px;
+          position: fixed; right: 0; top: 50%;
+          transform: translateY(-50%) rotate(90deg); transform-origin: center center;
+          z-index: 50; font-family: var(--font-geist-sans), sans-serif;
+          font-size: 0.6rem; font-weight: 500; letter-spacing: 0.2em; text-transform: uppercase;
+          color: rgba(255,255,255,0.35); white-space: nowrap; pointer-events: none; margin-right: -28px;
         }
-
         .mu-loop-content {
           opacity: ${contentVisible ? 1 : 0};
           transition: opacity ${CONTENT_FADE_MS}ms ease;
           will-change: opacity;
         }
-
         .loop-eyebrow {
           font-family: var(--font-geist-sans), sans-serif;
-          font-size: 0.7rem;
-          font-weight: 500;
-          letter-spacing: 0.32em;
-          text-transform: uppercase;
-          color: rgba(255,255,255,0.45);
-          margin: 0 0 0.6em 0;
-          min-height: 1em;
+          font-size: 0.7rem; font-weight: 500; letter-spacing: 0.32em;
+          text-transform: uppercase; color: rgba(255,255,255,0.45); margin: 0 0 0.6em 0; min-height: 1em;
         }
         .loop-heading {
           font-family: 'Anton', sans-serif;
-          font-size: clamp(2.2rem, 5vw, 4.5rem);
-          letter-spacing: 0.04em;
-          text-transform: uppercase;
-          color: #ffffff;
-          line-height: 1.05;
-          margin: 0;
+          font-size: clamp(2.2rem, 5vw, 4.5rem); letter-spacing: 0.04em;
+          text-transform: uppercase; color: #fff; line-height: 1.05; margin: 0;
           text-shadow: 0 2px 24px rgba(0,0,0,0.45);
         }
         .loop-description {
           font-family: var(--font-geist-sans), sans-serif;
-          font-size: clamp(0.85rem, 1.1vw, 1.05rem);
-          font-weight: 300;
-          letter-spacing: 0.01em;
-          line-height: 1.5;
-          color: rgba(255,255,255,0.8);
-          text-align: right;
-          margin: 0;
-          text-shadow: 0 2px 20px rgba(0,0,0,0.5);
+          font-size: clamp(0.85rem, 1.1vw, 1.05rem); font-weight: 300;
+          letter-spacing: 0.01em; line-height: 1.5; color: rgba(255,255,255,0.8);
+          text-align: right; margin: 0; text-shadow: 0 2px 20px rgba(0,0,0,0.5);
         }
       `}</style>
 
       <div
         ref={wrapperRef}
-        style={{
-          position: "fixed", inset: 0,
-          width: "100vw", height: "100vh",
-          overflow: "hidden", background: "#000",
-        }}
+        style={{ position: "fixed", inset: 0, width: "100vw", height: "100vh", overflow: "hidden", background: "#000" }}
       >
         <canvas
           ref={canvasRef}
@@ -1194,60 +1022,42 @@ const handleScroll = useCallback((e: WheelEvent) => {
           </div>
           <div className="mu-header-right">
             <button className="mu-cta">Register Now</button>
-            <div className="mu-hamburger">
-              <span /><span /><span />
-            </div>
+            <div className="mu-hamburger"><span /><span /><span /></div>
           </div>
         </header>
 
         <nav className="mu-sidenav">
-          {/* Vertical track + sliding dot */}
           <div className="mu-sidenav-track-wrap">
             <div className="mu-sidenav-track" />
-            <div
-              className="mu-sidenav-indicator"
-              style={{
-                top: `${pillTop}px`,
-              }}
-            />
+            <div className="mu-sidenav-indicator" style={{ top: `${pillTop}px` }} />
           </div>
-
           <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
-          {NAV_LABELS.map((label, i) => {
-            // loop 0 (initial) and loop 1 both map to Origin (i=0)
-            // loop 2 → Discover (i=1), loop 3 → Highlights (i=2), etc.
-            const navIdx = activeLoopIdx <= 1 ? 0 : activeLoopIdx - 1;
-            const navActive = navIdx === i;
-            return (
-              <div
-                key={label}
-                ref={(el) => { navItemRefs.current[i] = el; }}
-                className="mu-sidenav-item"
-                onClick={() => {
-                  // Jump instantly to the start of the corresponding loop
-                  // Nav item 0 (Origin) → LOOPS[1], item 1 → LOOPS[2], etc.
-                  const loopIdx = i + 1;
-                  if (loopIdx < LOOPS.length) {
-                    // Quick fade-out/in around the instant jump so the text
-                    // doesn't just teleport either.
-                    setContentVisible(false);
-                    frameFloatRef.current = LOOPS[loopIdx].start;
-                    currentLoopRef.current = loopIdx;
-                    loopPlayDirRef.current = 1;
-                    // Cancel any in-progress transition
-                    isTransitioningRef.current = false;
-                    directionRef.current = 0;
-                    window.setTimeout(() => setContentVisible(true), CONTENT_FADE_MS);
-                  }
-                }}
-                style={{ cursor: "pointer" }}
-              >
-                <span className={`mu-sidenav-label${navActive ? " active" : ""}`}>
-                  {label}
-                </span>
-              </div>
-            );
-          })}
+            {NAV_LABELS.map((label, i) => {
+              const navIdx    = activeLoopIdx <= 1 ? 0 : activeLoopIdx - 1;
+              const navActive = navIdx === i;
+              return (
+                <div
+                  key={label}
+                  ref={(el) => { navItemRefs.current[i] = el; }}
+                  className="mu-sidenav-item"
+                  onClick={() => {
+                    const loopIdx = i + 1;
+                    if (loopIdx < LOOPS.length) {
+                      setContentVisible(false);
+                      frameFloatRef.current      = LOOPS[loopIdx].start;
+                      currentLoopRef.current     = loopIdx;
+                      loopPlayDirRef.current     = 1;
+                      isTransitioningRef.current = false;
+                      directionRef.current       = 0;
+                      window.setTimeout(() => setContentVisible(true), CONTENT_FADE_MS);
+                    }
+                  }}
+                  style={{ cursor: "pointer" }}
+                >
+                  <span className={`mu-sidenav-label${navActive ? " active" : ""}`}>{label}</span>
+                </div>
+              );
+            })}
           </div>
         </nav>
 
@@ -1260,50 +1070,37 @@ const handleScroll = useCallback((e: WheelEvent) => {
           ) : null;
         })()}
 
-        {/* ── DEBUG — remove before prod ───────────────────────────────────── */}
-        <div
-          style={{
-            position: "fixed", top: 64, left: 16, zIndex: 999,
-            background: "rgba(0,0,0,0.65)", color: "#00ff88",
-            fontFamily: "monospace", fontSize: "13px",
-            padding: "6px 12px", borderRadius: "4px", pointerEvents: "none",
-          }}
-        >
+        {/* ── DEBUG — remove before prod ── */}
+        <div style={{
+          position: "fixed", top: 64, left: 16, zIndex: 999,
+          background: "rgba(0,0,0,0.65)", color: "#00ff88",
+          fontFamily: "monospace", fontSize: "13px",
+          padding: "6px 12px", borderRadius: "4px", pointerEvents: "none",
+        }}>
           frame {debugFrame} / {frameCount} — {debugPhase}
         </div>
 
         {!loaded && (
-          <div
-            style={{
-              position: "fixed", inset: 0, zIndex: 100, background: "#000",
-              display: "flex", flexDirection: "column",
-              alignItems: "center", justifyContent: "center", gap: "2rem",
-            }}
-          >
-            <div
-              style={{
-                width: "260px", height: "1px",
-                background: "rgba(255,255,255,0.12)",
-                position: "relative", overflow: "hidden",
-              }}
-            >
-              <div
-                style={{
-                  position: "absolute", inset: 0, background: "#fff",
-                  transformOrigin: "left",
-                  transform: `scaleX(${loadPct / 100})`,
-                  transition: "transform 0.3s ease",
-                }}
-              />
+          <div style={{
+            position: "fixed", inset: 0, zIndex: 100, background: "#000",
+            display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center", gap: "2rem",
+          }}>
+            <div style={{
+              width: "260px", height: "1px", background: "rgba(255,255,255,0.12)",
+              position: "relative", overflow: "hidden",
+            }}>
+              <div style={{
+                position: "absolute", inset: 0, background: "#fff",
+                transformOrigin: "left", transform: `scaleX(${loadPct / 100})`,
+                transition: "transform 0.3s ease",
+              }} />
             </div>
-            <p
-              style={{
-                fontFamily: '"Anton", sans-serif',
-                fontSize: "0.75rem", letterSpacing: "0.3em",
-                textTransform: "uppercase",
-                color: "rgba(255,255,255,0.4)", margin: 0,
-              }}
-            >
+            <p style={{
+              fontFamily: '"Anton", sans-serif', fontSize: "0.75rem",
+              letterSpacing: "0.3em", textTransform: "uppercase",
+              color: "rgba(255,255,255,0.4)", margin: 0,
+            }}>
               {loadPct < 100 ? `Loading — ${loadPct}%` : "Starting…"}
             </p>
           </div>
