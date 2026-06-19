@@ -15,7 +15,7 @@ gsap.registerPlugin(SplitText);
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const SOURCE_FPS        = 20;
-const TRANSITION_FPS    = 60;
+const TRANSITION_FPS    = 45;
 const PARALLAX_STRENGTH = 0.032;
 const PARALLAX_LERP     = 0.06;
 const ZOOM              = 1.12;
