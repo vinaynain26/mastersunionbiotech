@@ -9,6 +9,7 @@ import Loop2 from "./loops/Loop2";
 import Loop3 from "./loops/Loop3";
 import Loop4 from "./loops/Loop4";
 import Loop5 from "./loops/Loop5";
+import Loop6 from "./loops/Loop6";
 import Image from "next/image";
 
 gsap.registerPlugin(SplitText);
@@ -32,7 +33,7 @@ const LOOPS = [
 
 // ── Loop copy ─────────────────────────────────────────────────────────────────
 const LOOP_CONTENT = [
-  { component: Loop0 },
+  { component: Loop6 },
   { component: Loop1 },
   { component: Loop2 },
   { component: Loop3 },
