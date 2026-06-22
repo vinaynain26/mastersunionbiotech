@@ -9,6 +9,9 @@ import Loop2 from "./loops/Loop2";
 import Loop3 from "./loops/Loop3";
 import Loop4 from "./loops/Loop4";
 import Loop5 from "./loops/Loop5";
+import Loop6 from "./loops/Loop6";
+import Loop8 from "./loops/Loop8";
+import Loop9 from "./loops/Loop9";
 import Image from "next/image";
 
 gsap.registerPlugin(SplitText);
@@ -23,14 +26,13 @@ const CONTENT_FADE_MS   = 280;
 
 // ── Loop ranges (0-indexed) ───────────────────────────────────────────────────
 const LOOPS = [
-  { start: 10,  end: 48  }, // 0 — initial
-  { start: 125, end: 168 }, // 1 — origin
-  { start: 220, end: 260 }, // 2 — discover
-  { start: 405, end: 420 }, // 3 — placeholder
-  { start: 660, end: 680 }, // 4 — placeholder
+  { start: 10,  end: 48  },
+  { start: 125, end: 168 },
+  { start: 220, end: 260 },
+  { start: 405, end: 420 },
+  { start: 660, end: 680 },
 ];
 
-// ── Loop copy ─────────────────────────────────────────────────────────────────
 const LOOP_CONTENT = [
   { component: Loop0 },
   { component: Loop1 },
@@ -41,7 +43,7 @@ const LOOP_CONTENT = [
 
 const NAV_LABELS = ["Origin", "Discover", "Highlights", "Speakers", "Awards", "Passes"];
 
-// ── Fluid sim ─────────────────────────────────────────────────────────────────
+// ── Fluid sim constants ───────────────────────────────────────────────────────
 const SIM_RES       = 128;
 const VELOCITY_DISS = 0.8;
 const PRESSURE_ITER = 6;
@@ -52,17 +54,11 @@ const DISP_STRENGTH = 0.004;
 
 const SCROLL_THRESHOLD = 30;
 
-// ── Texture window config ─────────────────────────────────────────────────────
 const WINDOW_BEHIND = 30;
 const WINDOW_AHEAD  = 150;
 const FETCH_BATCH   = 24;
-
-// ── Progressive cache config ──────────────────────────────────────────────────
-// How many inter-loop transition frames to pre-cache while a loop is playing.
-// e.g. if current loop ends at 168 and next starts at 220, we cache 168→220.
 const INTERLOOP_PREFETCH_BATCH = 16;
 
-// ── Ease-in-out helper ────────────────────────────────────────────────────────
 function easeInOut(t: number): number {
   return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
 }
@@ -239,9 +235,8 @@ const COMPOSITE_FRAG = `
     gl_FragColor=mix(texture2D(tPrev,uv), texture2D(tFrame,uv), uBlend);
   }`;
 
-// ── Bitmap cache (module-level, survives re-renders) ─────────────────────────
+// ── Bitmap cache ──────────────────────────────────────────────────────────────
 const BITMAP_CACHE = new Map<number, ImageBitmap>();
-
 const trimBitmapCache = (max = 600) => {
   if (BITMAP_CACHE.size <= max) return;
   const keys = Array.from(BITMAP_CACHE.keys());
@@ -285,21 +280,18 @@ export default function VideoScrollExperience({
   const currentLoopRef = useRef(0);
   const readyRef       = useRef(false);
   const scrollAccRef   = useRef(0);
-
-  // Ping-pong direction inside the active loop: +1 forward, -1 reverse
   const loopPlayDirRef = useRef(1);
 
-  // ── Transition state ──────────────────────────────────────────────────────
   const isTransitioningRef    = useRef(false);
   const transitionTotalRef    = useRef(0);
   const transitionCoveredRef  = useRef(0);
   const transitionDirRef      = useRef(0);
 
-  // ── Progressive cache tracking ────────────────────────────────────────────
-  // Which loop index has already had its "next loop + inter-loop" frames queued
   const cachedUpToLoopRef = useRef(-1);
-  // Whether a background cache job is running (prevents overlap)
   const bgCachingRef      = useRef(false);
+
+  // ── NEW: prevent double-firing the end transition ─────────────────────────
+  const endTransitionFiredRef = useRef(false);
 
   const prevFrameTexRef = useRef<WebGLTexture | null>(null);
   const blendRef        = useRef(1.0);
@@ -308,14 +300,20 @@ export default function VideoScrollExperience({
   const prevMouseRef = useRef({ x: 0.5, y: 0.5 });
   const parallaxRef  = useRef({ x: 0, y: 0 });
 
-  const [loadPct, setLoadPct]           = useState(0);
-  const [loaded, setLoaded]             = useState(false);
-  const [debugFrame, setDebugFrame]     = useState(0);
-  const [debugPhase, setDebugPhase]     = useState("INIT");
+  const [loadPct, setLoadPct]             = useState(0);
+  const [loaded, setLoaded]               = useState(false);
+  const [debugFrame, setDebugFrame]       = useState(0);
+  const [debugPhase, setDebugPhase]       = useState("INIT");
   const [activeLoopIdx, setActiveLoopIdx] = useState(0);
-  const [pillTop, setPillTop]           = useState(0);
+  const [pillTop, setPillTop]             = useState(0);
   const [contentVisible, setContentVisible] = useState(true);
   const navItemRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+  // ── Page transition states ────────────────────────────────────────────────
+  // overlayVisible: black overlay fades in/out during the switch
+  // showStaticContent: swaps the main body (video → static)
+  const [overlayVisible, setOverlayVisible]       = useState(false);
+  const [showStaticContent, setShowStaticContent] = useState(false);
 
   // ── Pill position ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -502,11 +500,8 @@ export default function VideoScrollExperience({
     }
   }, [frameCount]);
 
-  // ── fetchFrame: bitmap-cache fast path + CDN slow path ───────────────────
   const fetchFrame = useCallback(async (i: number) => {
     if (textureReady.current[i] || loadingSet.current.has(i)) return;
-
-    // Fast path — bitmap already decoded this session, just re-upload to GPU
     if (BITMAP_CACHE.has(i)) {
       const gl = glRef.current; if (!gl) return;
       gl.activeTexture(gl.TEXTURE0);
@@ -515,8 +510,6 @@ export default function VideoScrollExperience({
       textureReady.current[i] = true;
       return;
     }
-
-    // Slow path — fetch, decode, cache bitmap, upload to GPU
     loadingSet.current.add(i);
     const controller = new AbortController();
     abortMap.current.set(i, controller);
@@ -556,26 +549,16 @@ export default function VideoScrollExperience({
       await Promise.all(needed.slice(b, b + FETCH_BATCH).map(fetchFrame));
   }, [getWindow, evictOutOfWindow, fetchFrame]);
 
-  // ── Progressive background caching ───────────────────────────────────────
-  // Called whenever the active loop changes. Queues:
-  //   1. The next loop's frames (so the destination is ready)
-  //   2. The inter-loop transition frames between current end → next start
-  //      (so scrubbing into the transition never stutters)
-  // Does nothing if already cached up to this loop or a job is running.
   const triggerNextLoopCache = useCallback(async (loopIdx: number) => {
     const nextIdx = loopIdx + 1;
-    if (nextIdx >= LOOPS.length)          return; // already at last loop
-    if (cachedUpToLoopRef.current >= nextIdx) return; // already done
-    if (bgCachingRef.current)             return; // job already running
-
-    bgCachingRef.current = true;
+    if (nextIdx >= LOOPS.length)              return;
+    if (cachedUpToLoopRef.current >= nextIdx) return;
+    if (bgCachingRef.current)                 return;
+    bgCachingRef.current      = true;
     cachedUpToLoopRef.current = nextIdx;
-
     try {
       const currentLoop = LOOPS[loopIdx];
       const nextLoop    = LOOPS[nextIdx];
-
-      // 1. Inter-loop transition frames (current.end → next.start)
       const interFrames: number[] = [];
       for (let i = currentLoop.end + 1; i < nextLoop.start; i++) {
         if (!BITMAP_CACHE.has(i) && !textureReady.current[i]) interFrames.push(i);
@@ -583,11 +566,8 @@ export default function VideoScrollExperience({
       for (let b = 0; b < interFrames.length; b += INTERLOOP_PREFETCH_BATCH) {
         if (!readyRef.current) break;
         await Promise.all(interFrames.slice(b, b + INTERLOOP_PREFETCH_BATCH).map(fetchFrame));
-        // Yield a frame between batches so we don't starve the render loop
         await new Promise((r) => setTimeout(r, 0));
       }
-
-      // 2. Next loop's own frames
       const nextLoopFrames: number[] = [];
       for (let i = nextLoop.start; i <= nextLoop.end; i++) {
         if (!BITMAP_CACHE.has(i) && !textureReady.current[i]) nextLoopFrames.push(i);
@@ -597,22 +577,14 @@ export default function VideoScrollExperience({
         await Promise.all(nextLoopFrames.slice(b, b + INTERLOOP_PREFETCH_BATCH).map(fetchFrame));
         await new Promise((r) => setTimeout(r, 0));
       }
-
     } finally {
       bgCachingRef.current = false;
     }
   }, [fetchFrame]);
 
-  // ── Initial load ──────────────────────────────────────────────────────────
-  // Phase 1 (blocking):  frame 0 + all Loop 0 frames → show experience
-  // Phase 2 (background): Loop 1 frames + inter-loop 0→1 frames
-  // Phase 3 (background): remaining loop frames in order
-  // Phase 4 (background): all remaining inter-loop frames
   const preloadFrames = useCallback(async () => {
-    // ── Phase 1: Loop 0 only ─────────────────────────────────────────────
     const phase1 = [0];
     for (let i = LOOPS[0].start; i <= LOOPS[0].end; i++) phase1.push(i);
-
     let done = 0;
     for (let b = 0; b < phase1.length; b += FETCH_BATCH) {
       await Promise.all(
@@ -624,15 +596,9 @@ export default function VideoScrollExperience({
         ),
       );
     }
-
-    // ── Show the experience ───────────────────────────────────────────────
     setLoaded(true);
     readyRef.current = true;
-
-    // ── Phase 2: inter-loop 0→1 + Loop 1 frames ──────────────────────────
     await triggerNextLoopCache(0);
-
-    // ── Phase 3: remaining loop ranges in sequence ────────────────────────
     for (let li = 2; li < LOOPS.length; li++) {
       if (!readyRef.current) break;
       const loop = LOOPS[li];
@@ -646,8 +612,6 @@ export default function VideoScrollExperience({
         await new Promise((r) => setTimeout(r, 0));
       }
     }
-
-    // ── Phase 4: inter-loop transition frames for all remaining gaps ──────
     for (let li = 1; li < LOOPS.length; li++) {
       if (!readyRef.current) break;
       const from = LOOPS[li - 1].end + 1;
@@ -662,11 +626,9 @@ export default function VideoScrollExperience({
         await new Promise((r) => setTimeout(r, 0));
       }
     }
-
     trimBitmapCache(600);
   }, [frameCount, fetchFrame, triggerNextLoopCache]);
 
-  // ── Canvas resize ─────────────────────────────────────────────────────────
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     const gl     = glRef.current;
@@ -676,6 +638,25 @@ export default function VideoScrollExperience({
     canvas.height       = window.innerHeight * dpr;
     canvas.style.width  = window.innerWidth  + "px";
     canvas.style.height = window.innerHeight + "px";
+  }, []);
+
+  // ── Page end transition helper ────────────────────────────────────────────
+  // Called once when the last frame is reached going forward.
+  // Sequence: black overlay fades IN (500ms) → static content swaps in → overlay fades OUT (500ms)
+  const triggerEndTransition = useCallback(() => {
+    if (endTransitionFiredRef.current) return;
+    endTransitionFiredRef.current = true;
+    isTransitioningRef.current    = false; // stop the paint loop driving frames
+
+    setOverlayVisible(true);              // fade overlay IN
+
+    setTimeout(() => {
+      setShowStaticContent(true);         // swap video → static content
+    }, 500);                              // halfway: overlay is fully black
+
+    setTimeout(() => {
+      setOverlayVisible(false);           // fade overlay OUT, revealing static content
+    }, 600);
   }, []);
 
   // ── Render loop ───────────────────────────────────────────────────────────
@@ -697,7 +678,6 @@ export default function VideoScrollExperience({
         blendRef.current = Math.min(1.0, blendRef.current + dt * 6);
 
         if (isTransitioningRef.current) {
-          // ── TRANSITION: eased scrub at TRANSITION_FPS ─────────────────
           const total   = transitionTotalRef.current;
           const covered = transitionCoveredRef.current;
           const tDir    = transitionDirRef.current;
@@ -710,14 +690,23 @@ export default function VideoScrollExperience({
           transitionCoveredRef.current  = covered + TRANSITION_FPS * dt;
           frameFloatRef.current         = Math.max(0, Math.min(frameCount - 1, frameFloatRef.current));
 
-          const newLoopIdx    = LOOPS.findIndex((l) => frameFloatRef.current >= l.start && frameFloatRef.current <= l.end);
-          const hitBoundary   = frameFloatRef.current <= 0 || frameFloatRef.current >= frameCount - 1;
+          const newLoopIdx  = LOOPS.findIndex((l) => frameFloatRef.current >= l.start && frameFloatRef.current <= l.end);
+          const hitEnd      = frameFloatRef.current >= frameCount - 1 && tDir === 1;
+          const hitStart    = frameFloatRef.current <= 0 && tDir === -1;
+          const hitBoundary = hitEnd || hitStart;
           const arrivedAtLoop = newLoopIdx >= 0 && newLoopIdx !== currentLoopRef.current;
+
+          // ── END OF ALL FRAMES → trigger page transition ───────────────
+          if (hitEnd) {
+            triggerEndTransition();
+            requestAnimationFrame(paint);
+            return; // don't do normal loop-arrival logic
+          }
 
           if (arrivedAtLoop || hitBoundary || transitionCoveredRef.current >= total) {
             if (arrivedAtLoop) {
               currentLoopRef.current = newLoopIdx;
-              loopPlayDirRef.current = 1; // always start forward on arrival
+              loopPlayDirRef.current = 1;
             }
             isTransitioningRef.current = false;
             directionRef.current       = 0;
@@ -725,17 +714,14 @@ export default function VideoScrollExperience({
           }
 
         } else {
-          // ── LOOP AUTOPLAY: ping-pong between loop.start and loop.end ──
           if (inLoopIdx >= 0) {
             if (currentLoopRef.current !== inLoopIdx) {
               currentLoopRef.current = inLoopIdx;
               loopPlayDirRef.current = 1;
             }
-
             const loop = LOOPS[inLoopIdx];
             const pd   = loopPlayDirRef.current;
             frameFloatRef.current += dt * SOURCE_FPS * pd;
-
             if (pd === 1 && frameFloatRef.current >= loop.end) {
               frameFloatRef.current  = loop.end - (frameFloatRef.current - loop.end);
               loopPlayDirRef.current = -1;
@@ -743,9 +729,7 @@ export default function VideoScrollExperience({
               frameFloatRef.current  = loop.start + (loop.start - frameFloatRef.current);
               loopPlayDirRef.current = 1;
             }
-
           } else {
-            // Between loops: autoplay forward
             frameFloatRef.current += dt * SOURCE_FPS;
             if (frameFloatRef.current >= frameCount - 1) frameFloatRef.current = frameCount - 1;
           }
@@ -753,22 +737,16 @@ export default function VideoScrollExperience({
 
         if (inLoopIdx >= 0) {
           setActiveLoopIdx(inLoopIdx);
-          // Trigger background caching for the next loop whenever we
-          // settle into a new loop (no-ops if already queued or running)
           if (!bgCachingRef.current && cachedUpToLoopRef.current < inLoopIdx + 1) {
             triggerNextLoopCache(inLoopIdx);
           }
         }
 
         dbgTick++;
-
-        // Full sliding-window update every 10 ticks
         if (dbgTick % 10 === 0) {
           const windowDir = isTransitioningRef.current ? directionRef.current : loopPlayDirRef.current;
           updateWindow(Math.floor(frameFloatRef.current), windowDir);
         }
-
-        // Tight lookahead every tick during transitions
         if (isTransitioningRef.current) {
           const cur = Math.floor(frameFloatRef.current);
           const dir = transitionDirRef.current;
@@ -779,7 +757,6 @@ export default function VideoScrollExperience({
           }
           if (lookahead.length > 0) Promise.all(lookahead.map(fetchFrame));
         }
-
         if (dbgTick % 6 === 0) {
           setDebugFrame(Math.floor(frameFloatRef.current));
           const phase = isTransitioningRef.current
@@ -823,11 +800,13 @@ export default function VideoScrollExperience({
 
     requestAnimationFrame((t) => { lastT = t; requestAnimationFrame(paint); });
     return () => { running = false; };
-  }, [frameCount, fluidStep, updateWindow, fetchFrame, triggerNextLoopCache]);
+  }, [frameCount, fluidStep, updateWindow, fetchFrame, triggerNextLoopCache, triggerEndTransition]);
 
   // ── Scroll handler ────────────────────────────────────────────────────────
   const handleScroll = useCallback((e: WheelEvent) => {
-    if (isTransitioningRef.current) return;
+    // Block scroll once the end transition has fired
+    if (endTransitionFiredRef.current)  return;
+    if (isTransitioningRef.current)     return;
     scrollAccRef.current += e.deltaY;
     if (Math.abs(scrollAccRef.current) < SCROLL_THRESHOLD) return;
     const scrollDir = scrollAccRef.current > 0 ? 1 : -1;
@@ -847,7 +826,6 @@ export default function VideoScrollExperience({
       directionRef.current         = 1;
       setContentVisible(false);
 
-      // Speculative prefetch for the entire path
       const end = Math.min(frameCount - 1, Math.ceil(f + distance + WINDOW_AHEAD));
       const ahead: number[] = [];
       for (let i = Math.floor(f); i <= end; i++) ahead.push(i);
@@ -912,10 +890,8 @@ export default function VideoScrollExperience({
   return (
     <>
       <style>{`
-
-
         .mu-header {
-          position: fixed; top: 40px; left: 0; right: 0; z-index: 50;
+          position: fixed; top: 40px; left: 0; right: 0; z-index: 200;
           display: flex; align-items: center; justify-content: space-between;
           padding: 0 clamp(16px, 3vw, 40px); height: 56px;
         }
@@ -943,10 +919,9 @@ export default function VideoScrollExperience({
           border-radius: 4px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);
         }
         .mu-hamburger span { display: block; width: 22px; height: 1.5px; background: rgba(255,255,255,0.8); }
-
         .mu-sidenav {
           position: fixed; left: 20px; top: 50%; transform: translateY(-50%);
-          z-index: 50; display: flex; flex-direction: row; align-items: flex-start;
+          z-index: 200; display: flex; flex-direction: row; align-items: flex-start;
           gap: 16px; pointer-events: none;
         }
         .mu-sidenav-track-wrap { position: relative; width: 12px; align-self: stretch; flex-shrink: 0; }
@@ -975,7 +950,7 @@ export default function VideoScrollExperience({
         .mu-collab {
           position: fixed; right: 0; top: 50%;
           transform: translateY(-50%) rotate(90deg); transform-origin: center center;
-          z-index: 50; font-family: var(--font-geist-sans), sans-serif;
+          z-index: 200; font-family: var(--font-geist-sans), sans-serif;
           font-size: 0.6rem; font-weight: 500; letter-spacing: 0.2em; text-transform: uppercase;
           color: rgba(255,255,255,0.35); white-space: nowrap; pointer-events: none; margin-right: -28px;
         }
@@ -1003,109 +978,172 @@ export default function VideoScrollExperience({
         }
       `}</style>
 
-      <div
-        ref={wrapperRef}
-        style={{ position: "fixed", inset: 0, width: "100vw", height: "100vh", overflow: "hidden", background: "#000" }}
-      >
-        <canvas
-          ref={canvasRef}
-          style={{ display: "block", width: "100%", height: "100%", pointerEvents: "none" }}
-        />
-
-        <header className="mu-header">
-          <div className="mu-header-left">
-            <div className="mu-logo-mark">
-              <img src="https://cdn.unionstack.link/uploads/18062026/v1/muLogo.svg" alt="muLogo" />
-            </div>
-            <div className="mu-logo-divider" />
-            <span className="mu-logo-school">School of BioScience</span>
+      {/* ── ALWAYS-VISIBLE: header + sidenav ── z-index 200 keeps them above everything */}
+      <header className="mu-header">
+        <div className="mu-header-left">
+          <div className="mu-logo-mark">
+            <img src="https://cdn.unionstack.link/uploads/18062026/v1/muLogo.svg" alt="muLogo" />
           </div>
-          <div className="mu-header-right">
-            <button className="mu-cta">Register Now</button>
-            <div className="mu-hamburger"><span /><span /><span /></div>
-          </div>
-        </header>
-
-        <nav className="mu-sidenav">
-          <div className="mu-sidenav-track-wrap">
-            <div className="mu-sidenav-track" />
-            <div className="mu-sidenav-indicator" style={{ top: `${pillTop}px` }} />
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
-            {NAV_LABELS.map((label, i) => {
-              const navIdx    = activeLoopIdx <= 1 ? 0 : activeLoopIdx - 1;
-              const navActive = navIdx === i;
-              return (
-                <div
-                  key={label}
-                  ref={(el) => { navItemRefs.current[i] = el; }}
-                  className="mu-sidenav-item"
-                  onClick={() => {
-                    const loopIdx = i + 1;
-                    if (loopIdx < LOOPS.length) {
-                      setContentVisible(false);
-                      frameFloatRef.current      = LOOPS[loopIdx].start;
-                      currentLoopRef.current     = loopIdx;
-                      loopPlayDirRef.current     = 1;
-                      isTransitioningRef.current = false;
-                      directionRef.current       = 0;
-                      window.setTimeout(() => setContentVisible(true), CONTENT_FADE_MS);
-                    }
-                  }}
-                  style={{ cursor: "pointer" }}
-                >
-                  <span className={`mu-sidenav-label${navActive ? " active" : ""}`}>{label}</span>
-                </div>
-              );
-            })}
-          </div>
-        </nav>
-
-        <span className="mu-collab">Collaborators</span>
-
-        {(() => {
-          const C = activeLoopIdx >= 0 ? LOOP_CONTENT[activeLoopIdx]?.component : null;
-          return C ? (
-            <div className="mu-loop-content fixed inset-0 z-30 pointer-events-none"><C /></div>
-          ) : null;
-        })()}
-
-        {/* ── DEBUG — remove before prod ── */}
-        <div style={{
-          position: "fixed", top: 64, left: 16, zIndex: 999,
-          background: "rgba(0,0,0,0.65)", color: "#00ff88",
-          fontFamily: "monospace", fontSize: "13px",
-          padding: "6px 12px", borderRadius: "4px", pointerEvents: "none",
-        }}>
-          frame {debugFrame} / {frameCount} — {debugPhase}
+          <div className="mu-logo-divider" />
+          <span className="mu-logo-school">School of BioScience</span>
         </div>
+        <div className="mu-header-right">
+          <button className="mu-cta">Register Now</button>
+          <div className="mu-hamburger"><span /><span /><span /></div>
+        </div>
+      </header>
 
-        {!loaded && (
+      <nav className="mu-sidenav">
+        <div className="mu-sidenav-track-wrap">
+          <div className="mu-sidenav-track" />
+          <div className="mu-sidenav-indicator" style={{ top: `${pillTop}px` }} />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
+          {NAV_LABELS.map((label, i) => {
+            const navIdx    = activeLoopIdx <= 1 ? 0 : activeLoopIdx - 1;
+            const navActive = navIdx === i;
+            return (
+              <div
+                key={label}
+                ref={(el) => { navItemRefs.current[i] = el; }}
+                className="mu-sidenav-item"
+                onClick={() => {
+                  if (endTransitionFiredRef.current) return; // lock nav during/after end transition
+                  const loopIdx = i + 1;
+                  if (loopIdx < LOOPS.length) {
+                    setContentVisible(false);
+                    frameFloatRef.current      = LOOPS[loopIdx].start;
+                    currentLoopRef.current     = loopIdx;
+                    loopPlayDirRef.current     = 1;
+                    isTransitioningRef.current = false;
+                    directionRef.current       = 0;
+                    window.setTimeout(() => setContentVisible(true), CONTENT_FADE_MS);
+                  }
+                }}
+                style={{ cursor: "pointer" }}
+              >
+                <span className={`mu-sidenav-label${navActive ? " active" : ""}`}>{label}</span>
+              </div>
+            );
+          })}
+        </div>
+      </nav>
+
+      <span className="mu-collab">Collaborators</span>
+
+      {/* ── BLACK OVERLAY — sits above everything, fades in/out during page transition ── */}
+      <div
+        style={{
+          position: "fixed", inset: 0, zIndex: 190,
+          background: "#000",
+          opacity: overlayVisible ? 1 : 0,
+          transition: "opacity 0.5s ease",
+          pointerEvents: overlayVisible ? "all" : "none",
+        }}
+      />
+
+      {/* ── VIDEO SCROLL EXPERIENCE — hidden once static content takes over ── */}
+      {!showStaticContent && (
+        <div
+          ref={wrapperRef}
+          style={{
+            position: "fixed", inset: 0,
+            width: "100vw", height: "100vh",
+            overflow: "hidden", background: "#000",
+          }}
+        >
+          <canvas
+            ref={canvasRef}
+            style={{ display: "block", width: "100%", height: "100%", pointerEvents: "none" }}
+          />
+
+          {/* Loop content overlay */}
+          {(() => {
+            const C = activeLoopIdx >= 0 ? LOOP_CONTENT[activeLoopIdx]?.component : null;
+            return C ? (
+              <div className="mu-loop-content fixed inset-0 z-30 pointer-events-none"><C /></div>
+            ) : null;
+          })()}
+
+          {/* DEBUG — remove before prod */}
           <div style={{
-            position: "fixed", inset: 0, zIndex: 100, background: "#000",
-            display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center", gap: "2rem",
+            position: "fixed", top: 64, left: 16, zIndex: 999,
+            background: "rgba(0,0,0,0.65)", color: "#00ff88",
+            fontFamily: "monospace", fontSize: "13px",
+            padding: "6px 12px", borderRadius: "4px", pointerEvents: "none",
           }}>
+            frame {debugFrame} / {frameCount} — {debugPhase}
+          </div>
+
+          {/* Loading screen */}
+          {!loaded && (
             <div style={{
-              width: "260px", height: "1px", background: "rgba(255,255,255,0.12)",
-              position: "relative", overflow: "hidden",
+              position: "fixed", inset: 0, zIndex: 100, background: "#000",
+              display: "flex", flexDirection: "column",
+              alignItems: "center", justifyContent: "center", gap: "2rem",
             }}>
               <div style={{
-                position: "absolute", inset: 0, background: "#fff",
-                transformOrigin: "left", transform: `scaleX(${loadPct / 100})`,
-                transition: "transform 0.3s ease",
-              }} />
+                width: "260px", height: "1px", background: "rgba(255,255,255,0.12)",
+                position: "relative", overflow: "hidden",
+              }}>
+                <div style={{
+                  position: "absolute", inset: 0, background: "#fff",
+                  transformOrigin: "left", transform: `scaleX(${loadPct / 100})`,
+                  transition: "transform 0.3s ease",
+                }} />
+              </div>
+              <p style={{
+                fontFamily: '"Anton", sans-serif', fontSize: "0.75rem",
+                letterSpacing: "0.3em", textTransform: "uppercase",
+                color: "rgba(255,255,255,0.4)", margin: 0,
+              }}>
+                {loadPct < 100 ? `Loading — ${loadPct}%` : "Starting…"}
+              </p>
             </div>
-            <p style={{
-              fontFamily: '"Anton", sans-serif', fontSize: "0.75rem",
-              letterSpacing: "0.3em", textTransform: "uppercase",
-              color: "rgba(255,255,255,0.4)", margin: 0,
-            }}>
-              {loadPct < 100 ? `Loading — ${loadPct}%` : "Starting…"}
-            </p>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
+
+      {/* ── STATIC CONTENT — mounts after all frames are done ── */}
+    {showStaticContent && (
+  <div
+    style={{
+      position: "fixed", inset: 0,
+      width: "100vw", height: "100vh",  
+      overflowY: "auto", overflowX: "hidden",
+      background: "#0a0a0a",
+      zIndex: 10,
+    }}
+  >
+    {/* Each loop component gets its own full-screen section */}
+    <section
+      style={{
+        position: "relative",
+        width: "100vw", minHeight: "100vh",
+      }}
+    >
+      <Loop6 />
+    </section>
+
+    <section
+      style={{
+        position: "relative",
+        width: "100vw", minHeight: "100vh",
+      }}
+    >
+      <Loop8 />
+    </section>
+
+    <section
+      style={{
+        position: "relative",
+        width: "100vw", minHeight: "100vh",
+      }}
+    >
+      <Loop9 />
+    </section>
+  </div>
+)}
     </>
   );
-} 
+}
