@@ -9,6 +9,7 @@ import Loop2 from "./loops/Loop2";
 import Loop3 from "./loops/Loop3";
 import Loop4 from "./loops/Loop4";
 import Loop5 from "./loops/Loop5";
+import Loop7 from "./loops/Loop7";
 import Image from "next/image";
 
 gsap.registerPlugin(SplitText);
@@ -32,7 +33,7 @@ const LOOPS = [
 
 // ── Loop copy ─────────────────────────────────────────────────────────────────
 const LOOP_CONTENT = [
-  { component: Loop0 },
+  { component: Loop7 },
   { component: Loop1 },
   { component: Loop2 },
   { component: Loop3 },
@@ -912,7 +913,7 @@ export default function VideoScrollExperience({
   return (
     <>
       <style>{`
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
 
         .mu-header {
           position: fixed; top: 40px; left: 0; right: 0; z-index: 50;
