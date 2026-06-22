@@ -912,7 +912,7 @@ export default function VideoScrollExperience({
   return (
     <>
       <style>{`
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
 
         .mu-header {
           position: fixed; top: 40px; left: 0; right: 0; z-index: 50;
