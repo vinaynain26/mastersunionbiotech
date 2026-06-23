@@ -13,11 +13,12 @@ import Loop6 from "./loops/Loop6";
 import Loop8 from "./loops/Loop8";
 import Loop9 from "./loops/Loop9";
 import Image from "next/image";
+import HighContent from "./loops/HighContent";
 
 gsap.registerPlugin(SplitText);
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const SOURCE_FPS        = 20;
+const SOURCE_FPS        = 24;
 const TRANSITION_FPS    = 45;
 const PARALLAX_STRENGTH = 0.032;
 const PARALLAX_LERP     = 0.06;
@@ -29,8 +30,10 @@ const LOOPS = [
   { start: 10,  end: 48  },
   { start: 125, end: 168 },
   { start: 220, end: 260 },
-  { start: 405, end: 420 },
+  { start: 430, end: 450 },
   { start: 660, end: 680 },
+
+  { start: 1100, end: 1222 },
 ];
 
 const LOOP_CONTENT = [
@@ -39,6 +42,7 @@ const LOOP_CONTENT = [
   { component: Loop2 },
   { component: Loop3 },
   { component: Loop4 },
+  { component: HighContent },
 ];
 
 const NAV_LABELS = ["Origin", "Discover", "Highlights", "Speakers", "Awards", "Passes"];
@@ -48,7 +52,7 @@ const SIM_RES       = 128;
 const VELOCITY_DISS = 0.8;
 const PRESSURE_ITER = 6;
 const CURL_AMOUNT   = 30;
-const SPLAT_RADIUS  = 0.055;
+const SPLAT_RADIUS  = 0.030;
 const SPLAT_FORCE   = 2500;
 const DISP_STRENGTH = 0.004;
 
