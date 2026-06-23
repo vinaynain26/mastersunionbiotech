@@ -13,6 +13,7 @@ import Loop6 from "./loops/Loop6";
 import Loop8 from "./loops/Loop8";
 import Loop9 from "./loops/Loop9";
 import Image from "next/image";
+import AgendaContent from "./loops/Agenda";
 import HighContent from "./loops/HighContent";
 
 gsap.registerPlugin(SplitText);
@@ -32,7 +33,7 @@ const LOOPS = [
   { start: 220, end: 260 },
   { start: 430, end: 450 },
   { start: 660, end: 680 },
-
+  { start: 845, end: 870 },
   { start: 1100, end: 1222 },
 ];
 
@@ -43,6 +44,7 @@ const LOOP_CONTENT = [
   { component: Loop3 },
   { component: Loop4 },
   { component: HighContent },
+  { component: AgendaContent },
 ];
 
 const NAV_LABELS = ["Origin", "Discover", "Highlights", "Speakers", "Awards", "Passes"];
@@ -961,7 +963,7 @@ export default function VideoScrollExperience({
         .mu-loop-content {
           opacity: ${contentVisible ? 1 : 0};
           transition: opacity ${CONTENT_FADE_MS}ms ease;
-          will-change: opacity;
+
         }
         .loop-eyebrow {
           font-family: var(--font-geist-sans), sans-serif;

@@ -74,17 +74,17 @@ export default function HighContent() {
   return (
     <>
       {/* ── Main headline — upper-left ── */}
-      <div className="absolute top-[22%] left-[13%] max-w-[46vw]">
+      <div className="absolute top-[25%] left-[13%] max-w-[46vw]">
         <h1 className="font-semibold text-white leading-[1.05]">
 
           {/* First sentence — slightly smaller weight */}
-          <div className="text-[clamp(28px,3.2vw,48px)] mb-2">
+          <div className="text-[32px] font-semibold leading-1.1 tracking-[0%] mb-4">
             <span ref={line1Ref} className="block">For centuries, we</span>
             <span ref={line2Ref} className="block">observed Biology.</span>
           </div>
 
           {/* Second sentence — visually larger, extra bold */}
-          <div className="text-[clamp(32px,3.8vw,56px)] mt-4">
+          <div className="text-[32px] font-semibold leading-[100%] tracking-[0%] mt-8">
             <span ref={line3Ref} className="block">Today, we can</span>
             <span ref={line4Ref} className="block">Engineer it.</span>
           </div>
@@ -93,10 +93,10 @@ export default function HighContent() {
       </div>
 
       {/* ── Description — lower-right ── */}
-      <div className="absolute bottom-[10%] right-[5%] max-w-[360px]">
+      <div className="absolute bottom-[10%] right-[0%] max-w-[480px]">
         <p
           ref={descRef}
-          className="text-[clamp(16px,1.5vw,22px)] font-semibold leading-[1.35] text-white"
+          className="text-[24px]  font-semibold leading-[120%] text-white"
         >
           Meet Nobel Laureates, founders, policymakers, clinicians, researchers, and
           academicians uncovering the mysteries.
