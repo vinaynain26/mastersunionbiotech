@@ -15,7 +15,7 @@ export default function Loop7() {
         </div>
 
         {/* Join Us Content */}
-        <div className="joinUsContent w-[580px] h-[368px] bg-white/10 backdrop-blur-xl rounded-xl p-10 flex flex-col justify-center">
+        <div className="joinUsContent w-[580px] h-[368px] bg-white/10 backdrop-blur-sm rounded-xl p-10 flex flex-col justify-center">
           
           <div className="heading text-[36px] leading-[1.1] uppercase ">
             Join us at <br />
@@ -40,7 +40,7 @@ export default function Loop7() {
             <div className="icon w-6 h-6 mt-0.5"><img src="https://cdn.unionstack.link/uploads/22062026/v1/avenue.svg" alt="avenue" /></div>
             <div className="placeAndCity">
               <div className="place text-[20px] font-medium">DLF Cyberpark</div>
-              <div className="city text-[16px] text-white/70">Gurugram, India</div>
+              <div className="city text-[16px] text-[#D4D4D4]">Gurugram, India</div>
             </div>
           </div>
 

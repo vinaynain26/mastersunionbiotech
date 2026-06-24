@@ -7,19 +7,19 @@ const hotels = [
     id: 'oberoi' as const,
     name: 'THE OBEROI',
     location: 'GURUGRAM',
-    image: 'https://cdn.unionstack.link/uploads/22062026/v1/leela.png',
+    image: 'https://cdn.unionstack.link/uploads/24062026/v1/oberoiHotel.png',
   },
   {
     id: 'leela' as const,
     name: 'THE LEELA',
     location: 'GURUGRAM',
-    image: 'https://cdn.unionstack.link/uploads/22062026/v1/leela.png',
+    image: 'https://cdn.unionstack.link/uploads/24062026/v1/leelaHotel.png',
   },
   {
     id: 'radisson' as const,
     name: 'RADISSON',
     location: 'GURUGRAM',
-    image: 'https://cdn.unionstack.link/uploads/22062026/v1/leela.png',
+    image: 'https://cdn.unionstack.link/uploads/24062026/v1/radisson.png',
   },
 ];
 
@@ -29,7 +29,7 @@ export default function Loop8() {
   const [activeHotel, setActiveHotel] = useState<HotelId>('leela');
 
   return (
-    <section className="relative z-[100] pointer-events-auto flex flex-col items-center justify-center h-full w-full  gap-6 font-sans" style={{ paddingLeft: '180px', paddingRight: '40px' }}>
+    <section className="relative z-[100] pointer-events-auto flex flex-col items-center justify-center h-[100vh] w-full  gap-6 font-sans " style={{ paddingLeft: '180px', paddingRight: '40px' }}>
 
       {/* Title */}
       <h2 className=" text-[36px] font-semibold uppercase text-white text-center">
@@ -37,7 +37,10 @@ export default function Loop8() {
       </h2>
 
       {/* Cards Row */}
-      <div className="flex gap-3 w-full h-[360px]">
+      <div
+  className="flex gap-3 w-full h-[360px]"
+  onMouseLeave={() => setActiveHotel('leela')}
+>
         {hotels.map((hotel) => {
           const isActive = activeHotel === hotel.id;
 
