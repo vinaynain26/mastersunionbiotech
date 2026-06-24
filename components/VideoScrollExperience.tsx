@@ -15,6 +15,7 @@ import Loop9 from "./loops/Loop9";
 import Image from "next/image";
 import AgendaContent from "./loops/Agenda";
 import HighContent from "./loops/HighContent";
+import StarfieldBackground from "./StarfieldBackground";
 
 gsap.registerPlugin(SplitText);
 
@@ -26,14 +27,19 @@ const PARALLAX_LERP     = 0.06;
 const ZOOM              = 1.12;
 const CONTENT_FADE_MS   = 280;
 
+// ── Stair transition config ───────────────────────────────────────────────────
+const STAIR_COUNT       = 5;
+const STAIR_DURATION_MS = 180;  // delay between each panel firing (ms) — slowed down
+const STAIR_SETTLE_MS   = 600;  // CSS transition duration — must match .mu-stair-panel transition
+
 // ── Loop ranges (0-indexed) ───────────────────────────────────────────────────
 const LOOPS = [
-  { start: 10,  end: 48  },
-  { start: 125, end: 168 },
-  { start: 220, end: 260 },
-  { start: 430, end: 450 },
-  { start: 660, end: 680 },
-  { start: 845, end: 870 },
+  { start: 10,  end: 48   },
+  { start: 125, end: 168  },
+  { start: 220, end: 260  },
+  { start: 430, end: 450  },
+  { start: 660, end: 680  },
+  { start: 845, end: 870  },
   { start: 1100, end: 1222 },
 ];
 
@@ -59,10 +65,9 @@ const SPLAT_FORCE   = 2500;
 const DISP_STRENGTH = 0.004;
 
 const SCROLL_THRESHOLD = 30;
-
-const WINDOW_BEHIND = 30;
-const WINDOW_AHEAD  = 150;
-const FETCH_BATCH   = 24;
+const WINDOW_BEHIND    = 30;
+const WINDOW_AHEAD     = 150;
+const FETCH_BATCH      = 24;
 const INTERLOOP_PREFETCH_BATCH = 16;
 
 function easeInOut(t: number): number {
@@ -292,12 +297,15 @@ export default function VideoScrollExperience({
   const transitionTotalRef    = useRef(0);
   const transitionCoveredRef  = useRef(0);
   const transitionDirRef      = useRef(0);
+  const transitionTargetRef   = useRef(0);
 
   const cachedUpToLoopRef = useRef(-1);
   const bgCachingRef      = useRef(false);
 
-  // ── NEW: prevent double-firing the end transition ─────────────────────────
-  const endTransitionFiredRef = useRef(false);
+  // ── Page transition guards ────────────────────────────────────────────────
+  const endTransitionFiredRef    = useRef(false);
+  const returnTransitionFiredRef = useRef(false);
+  const stairBusyRef             = useRef(false);
 
   const prevFrameTexRef = useRef<WebGLTexture | null>(null);
   const blendRef        = useRef(1.0);
@@ -306,20 +314,22 @@ export default function VideoScrollExperience({
   const prevMouseRef = useRef({ x: 0.5, y: 0.5 });
   const parallaxRef  = useRef({ x: 0, y: 0 });
 
-  const [loadPct, setLoadPct]             = useState(0);
-  const [loaded, setLoaded]               = useState(false);
-  const [debugFrame, setDebugFrame]       = useState(0);
-  const [debugPhase, setDebugPhase]       = useState("INIT");
-  const [activeLoopIdx, setActiveLoopIdx] = useState(0);
-  const [pillTop, setPillTop]             = useState(0);
+  const [loadPct, setLoadPct]               = useState(0);
+  const [loaded, setLoaded]                 = useState(false);
+  const [debugFrame, setDebugFrame]         = useState(0);
+  const [debugPhase, setDebugPhase]         = useState("INIT");
+  const [activeLoopIdx, setActiveLoopIdx]   = useState(0);
+  const [pillTop, setPillTop]               = useState(0);
   const [contentVisible, setContentVisible] = useState(true);
   const navItemRefs = useRef<(HTMLDivElement | null)[]>([]);
 
-  // ── Page transition states ────────────────────────────────────────────────
-  // overlayVisible: black overlay fades in/out during the switch
-  // showStaticContent: swaps the main body (video → static)
-  const [overlayVisible, setOverlayVisible]       = useState(false);
   const [showStaticContent, setShowStaticContent] = useState(false);
+
+  const [stairVisible, setStairVisible] = useState<boolean[]>(
+    Array(STAIR_COUNT).fill(false)
+  );
+
+  const staticScrollRef = useRef<HTMLDivElement>(null);
 
   // ── Pill position ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -646,24 +656,80 @@ export default function VideoScrollExperience({
     canvas.style.height = window.innerHeight + "px";
   }, []);
 
-  // ── Page end transition helper ────────────────────────────────────────────
-  // Called once when the last frame is reached going forward.
-  // Sequence: black overlay fades IN (500ms) → static content swaps in → overlay fades OUT (500ms)
-  const triggerEndTransition = useCallback(() => {
+  // ── Stair helpers ─────────────────────────────────────────────────────────
+  const runStairIn = useCallback((): Promise<void> => {
+    stairBusyRef.current = true;
+    return new Promise((resolve) => {
+      for (let i = 0; i < STAIR_COUNT; i++) {
+        setTimeout(() => {
+          setStairVisible((prev) => {
+            const next = [...prev]; next[i] = true; return next;
+          });
+          if (i === STAIR_COUNT - 1) setTimeout(resolve, STAIR_SETTLE_MS);
+        }, i * STAIR_DURATION_MS);
+      }
+    });
+  }, []);
+
+  const runStairOut = useCallback((): Promise<void> => {
+    return new Promise((resolve) => {
+      for (let i = 0; i < STAIR_COUNT; i++) {
+        setTimeout(() => {
+          setStairVisible((prev) => {
+            const next = [...prev]; next[i] = false; return next;
+          });
+          if (i === STAIR_COUNT - 1) {
+            setTimeout(() => {
+              stairBusyRef.current = false;
+              resolve();
+            }, STAIR_SETTLE_MS);
+          }
+        }, i * STAIR_DURATION_MS);
+      }
+    });
+  }, []);
+
+  // ── Forward transition: video → static ───────────────────────────────────
+  const triggerEndTransition = useCallback(async () => {
     if (endTransitionFiredRef.current) return;
     endTransitionFiredRef.current = true;
-    isTransitioningRef.current    = false; // stop the paint loop driving frames
+    isTransitioningRef.current    = false;
 
-    setOverlayVisible(true);              // fade overlay IN
+    // Lock out content immediately so agenda never re-flashes during stair wipe
+    setContentVisible(false);
 
-    setTimeout(() => {
-      setShowStaticContent(true);         // swap video → static content
-    }, 500);                              // halfway: overlay is fully black
+    // 1. Stairs wipe IN covering the video
+    await runStairIn();
+    // 2. Bring static content to front (video stays mounted underneath)
+    setShowStaticContent(true);
+    // 3. Stairs wipe OUT revealing static content
+    await runStairOut();
+  }, [runStairIn, runStairOut]);
 
-    setTimeout(() => {
-      setOverlayVisible(false);           // fade overlay OUT, revealing static content
-    }, 600);
-  }, []);
+  // ── Backward transition: static → video ──────────────────────────────────
+  const triggerReturnToVideo = useCallback(async () => {
+    if (returnTransitionFiredRef.current) return;
+    returnTransitionFiredRef.current = true;
+
+    // 1. Stairs wipe IN covering static content
+    await runStairIn();
+
+    // 2. Reset video state and bring video back to front
+    frameFloatRef.current      = LOOPS[LOOPS.length - 1].start;
+    currentLoopRef.current     = LOOPS.length - 1;
+    loopPlayDirRef.current     = 1;
+    isTransitioningRef.current = false;
+    directionRef.current       = 0;
+    setShowStaticContent(false); // video div was always mounted; now just raise it
+
+    // Reset guards so the full cycle can happen again
+    endTransitionFiredRef.current    = false;
+    returnTransitionFiredRef.current = false;
+
+    // 3. Stairs wipe OUT revealing video, then show content after reveal completes
+    await runStairOut();
+    setContentVisible(true);
+  }, [runStairIn, runStairOut]);
 
   // ── Render loop ───────────────────────────────────────────────────────────
   const startRenderLoop = useCallback(() => {
@@ -696,23 +762,25 @@ export default function VideoScrollExperience({
           transitionCoveredRef.current  = covered + TRANSITION_FPS * dt;
           frameFloatRef.current         = Math.max(0, Math.min(frameCount - 1, frameFloatRef.current));
 
-          const newLoopIdx  = LOOPS.findIndex((l) => frameFloatRef.current >= l.start && frameFloatRef.current <= l.end);
-          const hitEnd      = frameFloatRef.current >= frameCount - 1 && tDir === 1;
-          const hitStart    = frameFloatRef.current <= 0 && tDir === -1;
-          const hitBoundary = hitEnd || hitStart;
+          const newLoopIdx    = LOOPS.findIndex((l) => frameFloatRef.current >= l.start && frameFloatRef.current <= l.end);
+          const hitEnd        = frameFloatRef.current >= frameCount - 1 && tDir === 1;
           const arrivedAtLoop = newLoopIdx >= 0 && newLoopIdx !== currentLoopRef.current;
 
-          // ── END OF ALL FRAMES → trigger page transition ───────────────
           if (hitEnd) {
             triggerEndTransition();
             requestAnimationFrame(paint);
-            return; // don't do normal loop-arrival logic
+            return;
           }
 
-          if (arrivedAtLoop || hitBoundary || transitionCoveredRef.current >= total) {
-            if (arrivedAtLoop) {
-              currentLoopRef.current = newLoopIdx;
+          if (arrivedAtLoop || transitionCoveredRef.current >= total) {
+            frameFloatRef.current = transitionTargetRef.current;
+            const landedIdx = LOOPS.findIndex(
+              (l) => frameFloatRef.current >= l.start && frameFloatRef.current <= l.end
+            );
+            if (landedIdx >= 0) {
+              currentLoopRef.current = landedIdx;
               loopPlayDirRef.current = 1;
+              setActiveLoopIdx(landedIdx);
             }
             isTransitioningRef.current = false;
             directionRef.current       = 0;
@@ -808,11 +876,13 @@ export default function VideoScrollExperience({
     return () => { running = false; };
   }, [frameCount, fluidStep, updateWindow, fetchFrame, triggerNextLoopCache, triggerEndTransition]);
 
-  // ── Scroll handler ────────────────────────────────────────────────────────
+  // ── Video wheel handler ───────────────────────────────────────────────────
   const handleScroll = useCallback((e: WheelEvent) => {
-    // Block scroll once the end transition has fired
-    if (endTransitionFiredRef.current)  return;
-    if (isTransitioningRef.current)     return;
+    if (showStaticContent)                 return;
+    if (endTransitionFiredRef.current)     return;
+    if (isTransitioningRef.current)        return;
+    if (stairBusyRef.current)             return;
+
     scrollAccRef.current += e.deltaY;
     if (Math.abs(scrollAccRef.current) < SCROLL_THRESHOLD) return;
     const scrollDir = scrollAccRef.current > 0 ? 1 : -1;
@@ -823,8 +893,8 @@ export default function VideoScrollExperience({
     if (scrollDir === 1 && f < frameCount - 1) {
       const nextLoop    = LOOPS.find((l) => l.start > f);
       const targetFrame = nextLoop ? nextLoop.start : frameCount - 1;
-      const distance    = targetFrame - f;
-
+      transitionTargetRef.current  = targetFrame;
+      const distance               = targetFrame - f;
       isTransitioningRef.current   = true;
       transitionDirRef.current     = 1;
       transitionTotalRef.current   = distance;
@@ -841,7 +911,7 @@ export default function VideoScrollExperience({
       const prevLoop    = [...LOOPS].reverse().find((l) => l.end < f);
       const targetFrame = prevLoop ? prevLoop.start : 0;
       const distance    = f - targetFrame;
-
+      transitionTargetRef.current  = targetFrame;
       isTransitioningRef.current   = true;
       transitionDirRef.current     = -1;
       transitionTotalRef.current   = distance;
@@ -854,7 +924,20 @@ export default function VideoScrollExperience({
       for (let i = Math.ceil(f); i >= start; i--) behind.push(i);
       for (let b = 0; b < behind.length; b += 32) Promise.all(behind.slice(b, b + 32).map(fetchFrame));
     }
-  }, [frameCount, fetchFrame]);
+  }, [showStaticContent, frameCount, fetchFrame]);
+
+  // ── Static content wheel handler ──────────────────────────────────────────
+  const handleStaticScroll = useCallback((e: WheelEvent) => {
+    if (!showStaticContent)                    return;
+    if (stairBusyRef.current)                 return;
+    if (returnTransitionFiredRef.current)      return;
+    if (e.deltaY >= 0)                         return;
+
+    const el = staticScrollRef.current;
+    if (el && el.scrollTop > 0)               return;
+
+    triggerReturnToVideo();
+  }, [showStaticContent, triggerReturnToVideo]);
 
   // ── Mouse handler ─────────────────────────────────────────────────────────
   const handleMouseMove = useCallback((e: MouseEvent) => {
@@ -877,7 +960,8 @@ export default function VideoScrollExperience({
       stopRender = startRenderLoop() ?? undefined;
       window.addEventListener("resize", resizeCanvas);
       window.addEventListener("mousemove", handleMouseMove);
-      window.addEventListener("wheel", handleScroll as EventListener, { passive: true });
+      window.addEventListener("wheel", handleScroll as EventListener,       { passive: true });
+      window.addEventListener("wheel", handleStaticScroll as EventListener, { passive: true });
       await preloadFrames();
     };
     init();
@@ -887,15 +971,33 @@ export default function VideoScrollExperience({
       window.removeEventListener("resize", resizeCanvas);
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("wheel", handleScroll as EventListener);
+      window.removeEventListener("wheel", handleStaticScroll as EventListener);
       const gl = glRef.current;
       if (gl) frameTextures.current.forEach((t) => t && gl.deleteTexture(t));
     };
-  }, [initWebGL, resizeCanvas, preloadFrames, startRenderLoop, handleMouseMove, handleScroll]);
+  }, [initWebGL, resizeCanvas, preloadFrames, startRenderLoop, handleMouseMove, handleScroll, handleStaticScroll]);
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <>
       <style>{`
+        /* ── Stair panels ── */
+        .mu-stair-panel {
+          position: fixed;
+          top: 0;
+          bottom: 0;
+          z-index: 500;
+          background: #000;
+          transform: translateY(100%);
+          transition: transform ${STAIR_SETTLE_MS}ms cubic-bezier(0.76, 0, 0.24, 1);
+          will-change: transform;
+          pointer-events: none;
+        }
+        .mu-stair-panel.visible {
+          transform: translateY(0%);
+        }
+
+        /* ── Header / nav / shared chrome ── */
         .mu-header {
           position: fixed; top: 40px; left: 0; right: 0; z-index: 200;
           display: flex; align-items: center; justify-content: space-between;
@@ -906,7 +1008,6 @@ export default function VideoScrollExperience({
           width: 112px; height: 48px; border-radius: 3px;
           display: flex; align-items: center; justify-content: center;
         }
-        .mu-logo-mark span { font-size: 18px; color: #000; letter-spacing: -0.03em; }
         .mu-logo-divider { width: 1px; height: 18px; background: rgba(255,255,255,0.3); }
         .mu-logo-school {
           font-family: var(--font-geist-sans), sans-serif;
@@ -963,7 +1064,6 @@ export default function VideoScrollExperience({
         .mu-loop-content {
           opacity: ${contentVisible ? 1 : 0};
           transition: opacity ${CONTENT_FADE_MS}ms ease;
-
         }
         .loop-eyebrow {
           font-family: var(--font-geist-sans), sans-serif;
@@ -984,7 +1084,19 @@ export default function VideoScrollExperience({
         }
       `}</style>
 
-      {/* ── ALWAYS-VISIBLE: header + sidenav ── z-index 200 keeps them above everything */}
+      {/* ── STAIR PANELS — always in DOM, z-index 500 ── */}
+      {Array.from({ length: STAIR_COUNT }, (_, i) => (
+        <div
+          key={i}
+          className={`mu-stair-panel${stairVisible[i] ? " visible" : ""}`}
+          style={{
+            left:  `${(i / STAIR_COUNT) * 100}%`,
+            width: `${100 / STAIR_COUNT}%`,
+          }}
+        />
+      ))}
+
+      {/* ── ALWAYS-VISIBLE CHROME ── */}
       <header className="mu-header">
         <div className="mu-header-left">
           <div className="mu-logo-mark">
@@ -1014,7 +1126,7 @@ export default function VideoScrollExperience({
                 ref={(el) => { navItemRefs.current[i] = el; }}
                 className="mu-sidenav-item"
                 onClick={() => {
-                  if (endTransitionFiredRef.current) return; // lock nav during/after end transition
+                  if (endTransitionFiredRef.current) return;
                   const loopIdx = i + 1;
                   if (loopIdx < LOOPS.length) {
                     setContentVisible(false);
@@ -1037,119 +1149,103 @@ export default function VideoScrollExperience({
 
       <span className="mu-collab">Collaborators</span>
 
-      {/* ── BLACK OVERLAY — sits above everything, fades in/out during page transition ── */}
+      {/*
+        ── VIDEO LAYER ──────────────────────────────────────────────────────────
+        ALWAYS mounted so WebGL context + render loop never die.
+      */}
       <div
+        ref={wrapperRef}
         style={{
-          position: "fixed", inset: 0, zIndex: 190,
-          background: "#000",
-          opacity: overlayVisible ? 1 : 0,
-          transition: "opacity 0.5s ease",
-          pointerEvents: overlayVisible ? "all" : "none",
+          position: "fixed", inset: 0,
+          width: "100vw", height: "100vh",
+          overflow: "hidden", background: "#000",
+          zIndex: showStaticContent ? 5 : 10,
+          visibility: showStaticContent ? "hidden" : "visible",
         }}
-      />
+      >
+        <canvas
+          ref={canvasRef}
+          style={{ display: "block", width: "100%", height: "100%", pointerEvents: "none" }}
+        />
 
-      {/* ── VIDEO SCROLL EXPERIENCE — hidden once static content takes over ── */}
-      {!showStaticContent && (
-        <div
-          ref={wrapperRef}
-          style={{
-            position: "fixed", inset: 0,
-            width: "100vw", height: "100vh",
-            overflow: "hidden", background: "#000",
-          }}
-        >
-          <canvas
-            ref={canvasRef}
-            style={{ display: "block", width: "100%", height: "100%", pointerEvents: "none" }}
-          />
+        {/* Loop content overlay */}
+        {(() => {
+          const C = activeLoopIdx >= 0 ? LOOP_CONTENT[activeLoopIdx]?.component : null;
+          return C ? (
+            <div className="mu-loop-content fixed inset-0 z-30 pointer-events-none"><C /></div>
+          ) : null;
+        })()}
 
-          {/* Loop content overlay */}
-          {(() => {
-            const C = activeLoopIdx >= 0 ? LOOP_CONTENT[activeLoopIdx]?.component : null;
-            return C ? (
-              <div className="mu-loop-content fixed inset-0 z-30 pointer-events-none"><C /></div>
-            ) : null;
-          })()}
+        {/* DEBUG — remove before prod */}
+        <div style={{
+          position: "fixed", top: 64, left: 16, zIndex: 999,
+          background: "rgba(0,0,0,0.65)", color: "#00ff88",
+          fontFamily: "monospace", fontSize: "13px",
+          padding: "6px 12px", borderRadius: "4px", pointerEvents: "none",
+        }}>
+          frame {debugFrame} / {frameCount} — {debugPhase}
+        </div>
 
-          {/* DEBUG — remove before prod */}
+        {/* Loading screen */}
+        {!loaded && (
           <div style={{
-            position: "fixed", top: 64, left: 16, zIndex: 999,
-            background: "rgba(0,0,0,0.65)", color: "#00ff88",
-            fontFamily: "monospace", fontSize: "13px",
-            padding: "6px 12px", borderRadius: "4px", pointerEvents: "none",
+            position: "fixed", inset: 0, zIndex: 100, background: "#000",
+            display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center", gap: "2rem",
           }}>
-            frame {debugFrame} / {frameCount} — {debugPhase}
-          </div>
-
-          {/* Loading screen */}
-          {!loaded && (
             <div style={{
-              position: "fixed", inset: 0, zIndex: 100, background: "#000",
-              display: "flex", flexDirection: "column",
-              alignItems: "center", justifyContent: "center", gap: "2rem",
+              width: "260px", height: "1px", background: "rgba(255,255,255,0.12)",
+              position: "relative", overflow: "hidden",
             }}>
               <div style={{
-                width: "260px", height: "1px", background: "rgba(255,255,255,0.12)",
-                position: "relative", overflow: "hidden",
-              }}>
-                <div style={{
-                  position: "absolute", inset: 0, background: "#fff",
-                  transformOrigin: "left", transform: `scaleX(${loadPct / 100})`,
-                  transition: "transform 0.3s ease",
-                }} />
-              </div>
-              <p style={{
-                fontFamily: '"Anton", sans-serif', fontSize: "0.75rem",
-                letterSpacing: "0.3em", textTransform: "uppercase",
-                color: "rgba(255,255,255,0.4)", margin: 0,
-              }}>
-                {loadPct < 100 ? `Loading — ${loadPct}%` : "Starting…"}
-              </p>
+                position: "absolute", inset: 0, background: "#fff",
+                transformOrigin: "left", transform: `scaleX(${loadPct / 100})`,
+                transition: "transform 0.3s ease",
+              }} />
             </div>
-          )}
-        </div>
-      )}
+            <p style={{
+              fontFamily: '"Anton", sans-serif', fontSize: "0.75rem",
+              letterSpacing: "0.3em", textTransform: "uppercase",
+              color: "rgba(255,255,255,0.4)", margin: 0,
+            }}>
+              {loadPct < 100 ? `Loading — ${loadPct}%` : "Starting…"}
+            </p>
+          </div>
+        )}
+      </div>
 
-      {/* ── STATIC CONTENT — mounts after all frames are done ── */}
-    {showStaticContent && (
-  <div
-    style={{
-      position: "fixed", inset: 0,
-      width: "100vw", height: "100vh",  
-      overflowY: "auto", overflowX: "hidden",
-      background: "#0a0a0a",
-      zIndex: 10,
-    }}
-  >
-    {/* Each loop component gets its own full-screen section */}
-    <section
-      style={{
-        position: "relative",
-        width: "100vw", minHeight: "100vh",
-      }}
-    >
-      <Loop6 />
-    </section>
+      {/*
+        ── STATIC CONTENT LAYER ─────────────────────────────────────────────────────
+      */}
+      <div
+        ref={staticScrollRef}
+        style={{
+          position: "fixed", inset: 0,
+          width: "100vw", height: "100vh",
+          overflowY: "auto", overflowX: "hidden",
+          background: "#040201",
+          zIndex: showStaticContent ? 10 : 5,
+          display: showStaticContent ? "block" : "none",
+          isolation: "isolate",
+        }}
+      >
+        {/* ── Starfield background canvas — sits behind all content ── */}
+        <StarfieldBackground />
 
-    <section
-      style={{
-        position: "relative",
-        width: "100vw", minHeight: "100vh",
-      }}
-    >
-      <Loop8 />
-    </section>
-
-    <section
-      style={{
-        position: "relative",
-        width: "100vw", minHeight: "100vh",
-      }}
-    >
-      <Loop9 />
-    </section>
-  </div>
-)}
+        {/*
+          Loop6 (SpeakerSwiper): minHeight auto + overflow visible so the
+          two speaker rows + logo row are never clipped by section bounds.
+        */}
+        <section style={{ position: "relative", width: "100vw", minHeight: "auto", zIndex: 1, overflow: "visible" }}>
+          <Loop6 />
+        </section>
+        <section style={{ position: "relative", width: "100vw", minHeight: "100vh", zIndex: 1 }}>
+          <Loop8 />
+        </section>
+        <section style={{ position: "relative", width: "100vw", minHeight: "100vh", zIndex: 1 }}>
+          <Loop9 />
+        </section>
+      </div>
     </>
   );
 }

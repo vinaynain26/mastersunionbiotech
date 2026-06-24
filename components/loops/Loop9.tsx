@@ -15,7 +15,7 @@ export default function Loop7() {
         </div>
 
         {/* Join Us Content */}
-        <div className="joinUsContent w-[580px] h-[368px] bg-black/20 backdrop-blur-xl rounded-xl p-10 flex flex-col justify-center">
+        <div className="joinUsContent w-[580px] h-[368px] bg-white/10 backdrop-blur-xl rounded-xl p-10 flex flex-col justify-center">
           
           <div className="heading text-[36px] leading-[1.1] uppercase ">
             Join us at <br />

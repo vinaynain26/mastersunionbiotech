@@ -74,7 +74,7 @@ export default function HighContent() {
   return (
     <>
       {/* ── Main headline — upper-left ── */}
-      <div className="absolute top-[25%] left-[13%] max-w-[46vw]">
+      <div className="absolute top-[25%] left-[13%] max-w-[46vw] font-sans">
         <h1 className="font-semibold text-white leading-[1.05]">
 
           {/* First sentence — slightly smaller weight */}
