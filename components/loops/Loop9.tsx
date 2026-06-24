@@ -2,7 +2,7 @@
 
 export default function Loop7() {
   return (
-    <section className="relative min-h-screen flex items-center justify-center py-12 font-sans ml-50 ">
+    <section className="relative  flex items-center justify-center py-12 font-sans ml-50 ">
       <div className="contentContainer flex items-center gap-10  mx-auto px-6">
         
         {/* Background Image / HQ Image */}

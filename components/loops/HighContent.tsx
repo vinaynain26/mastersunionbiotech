@@ -93,7 +93,7 @@ export default function HighContent() {
       </div>
 
       {/* ── Description — lower-right ── */}
-      <div className="absolute bottom-[10%] right-[0%] max-w-[480px]">
+      <div className="absolute bottom-[10%] right-[2%] max-w-[480px]">
         <p
           ref={descRef}
           className="text-[24px]  font-semibold leading-[120%] text-white"

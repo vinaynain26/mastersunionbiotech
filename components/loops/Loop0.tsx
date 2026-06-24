@@ -36,33 +36,53 @@ export default function Loop0() {
   }, [])
 
   return (
-    <div className="absolute bottom-25 left-50  flex w-275  justify-between">
+    <div className="relative flex items-end h-full w-full justify-between pl-50 pr-20 pb-20 overflow-visible">
+
+      {/* Hero content */}
       <div className="heroContent">
-
-
-      <h2
-        ref={headingRef}
-        className="font-sans font-semibold text-[48px] uppercase  text-white leading-[1.05]"
-      >
-        THE NEXT GENE
-      </h2>
-      <p
-        ref={descRef}
-        className="font-sans text-[20px] font-regular text-white/50 mt-3"
-      >
-        Shaping India&apos;s bio-revolution.
-      </p>
+        <h2
+          ref={headingRef}
+          className="font-sans font-semibold text-[48px] uppercase text-white leading-[1.05]"
+        >
+          THE NEXT GENE
+        </h2>
+        <p
+          ref={descRef}
+          className="font-sans text-[20px] font-regular text-white/50"
+        >
+          Shaping India&apos;s bio-revolution.
+        </p>
       </div>
-      <div className="timings flex  backdrop-blur-lg bg-white/8  text-white justify-evenly gap-10 items-center px-8 py-5 w-132 rounded-lg  ">
-        <div className="time ">
-          <div className="subHead font-sans text-[12px] uppercase ">Saturday</div>
+
+      {/* Timings card */}
+      <div className="timings flex backdrop-blur-lg bg-white/8 text-white justify-evenly gap-10 items-center px-8 py-5 w-132 rounded-lg">
+        <div className="time">
+          <div className="subHead font-sans text-[12px] uppercase">Saturday</div>
           <div className="day font-sans font-semibold text-[20px]">19 Sept 2026</div>
         </div>
         <div className="location">
-          <div className="subHead font-sans text-[12px] uppercase">Masters' Union Campus</div>
+          <div className="subHead font-sans text-[12px] uppercase">Masters&apos; Union Campus</div>
           <div className="locationPoint font-sans font-semibold text-[20px]">DLF Cyberpark, Gurugram</div>
         </div>
       </div>
+
+      {/* Collaborators side indicator */}
+<div
+  className="absolute right-10 top-1/2 -translate-y-1/2 flex flex-col items-center"
+  style={{ marginRight: '-1px' }}
+>
+  <div className="w-px bg-white/20" style={{ height: '250px' , marginTop:'10px'}} />
+
+  <p
+    className="uppercase font-sans text-[12px] font-semibold whitespace-nowrap bg-white text-black px-3 py-[6px]"
+    style={{ writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}
+  >
+    Collaborators
+  </p>
+
+  <div className="w-px bg-white/20" style={{ height: '250px' }} />
+</div>
+
     </div>
   )
 }

@@ -70,7 +70,7 @@ const rows = [1, 2, 3]
 
 export default function AgendaContent() {
   return (
-    <div className="w-full pt-20 pb-16 pl-[200px] pr-[80px] box-border font-sans">
+    <div className="w-full pt-20 pb-16 pl-[200px] pr-[80px] box-border font-sans   h-full flex  flex-col justify-center ">
 
       {/* Section heading */}
       <h2 className="text-[40px] font-semibold text-white text-center uppercase  leading-none mb-10">

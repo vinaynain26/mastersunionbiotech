@@ -78,6 +78,8 @@ function SpeakerCard({ speaker, isCenter }: { speaker: Speaker; isCenter: boolea
         background: isCenter ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.02)',
         opacity: isCenter ? 1 : 0.45,
         transform: isCenter ? 'scale(1)' : 'scale(0.92)',
+         backdropFilter: 'blur(12px)',
+  WebkitBackdropFilter: 'blur(12px)',
       }}
     >
       <div className="flex items-center gap-5  ">

@@ -29,8 +29,8 @@ const CONTENT_FADE_MS   = 280;
 
 // ── Stair transition config ───────────────────────────────────────────────────
 const STAIR_COUNT       = 5;
-const STAIR_DURATION_MS = 180;  // delay between each panel firing (ms) — slowed down
-const STAIR_SETTLE_MS   = 600;  // CSS transition duration — must match .mu-stair-panel transition
+const STAIR_DURATION_MS = 180;
+const STAIR_SETTLE_MS   = 600;
 
 // ── Loop ranges (0-indexed) ───────────────────────────────────────────────────
 const LOOPS = [
@@ -53,7 +53,30 @@ const LOOP_CONTENT = [
   { component: AgendaContent },
 ];
 
-const NAV_LABELS = ["Origin", "Discover", "Highlights", "Speakers", "Awards", "Passes"];
+// ── Nav labels (7 items) ──────────────────────────────────────────────────────
+const NAV_LABELS = ["Origin", "Discover", "Highlights", "Agenda", "Speakers", "Awards", "Passes"];
+
+// Loop index → nav index mapping
+// Loops 0,1,2 → Origin (0)
+// Loops 3,4   → Discover (1)
+// Loop 5      → Highlights (2)
+// Loop 6      → Agenda (3)
+// Static content starts at Speakers (4)
+const getNavIdx = (activeLoopIdx: number, showStaticContent: boolean) => {
+  if (showStaticContent) return 4;
+  if (activeLoopIdx <= 2) return 0;
+  if (activeLoopIdx <= 4) return 1;
+  if (activeLoopIdx === 5) return 2;
+  return 3;
+};
+
+// Nav click → loop index mapping
+const NAV_LOOP_MAP: Record<number, number> = {
+  0: 0, // Origin     → Loop0
+  1: 3, // Discover   → Loop3
+  2: 5, // Highlights → Loop5
+  3: 6, // Agenda     → Loop6
+};
 
 // ── Fluid sim constants ───────────────────────────────────────────────────────
 const SIM_RES       = 128;
@@ -333,14 +356,14 @@ export default function VideoScrollExperience({
 
   // ── Pill position ─────────────────────────────────────────────────────────
   useEffect(() => {
-    const navIdx  = activeLoopIdx <= 1 ? 0 : activeLoopIdx - 1;
+    const navIdx  = getNavIdx(activeLoopIdx, showStaticContent);
     const navWrap = navItemRefs.current[0]?.parentElement;
     const item    = navItemRefs.current[navIdx];
     if (!navWrap || !item) return;
     const wrapTop  = navWrap.getBoundingClientRect().top;
     const itemRect = item.getBoundingClientRect();
     setPillTop(itemRect.top - wrapTop + itemRect.height / 2);
-  }, [activeLoopIdx]);
+  }, [activeLoopIdx, showStaticContent]);
 
   // ── WebGL helpers ─────────────────────────────────────────────────────────
   const blit = useCallback((fbo: WebGLFramebuffer | null, w: number, h: number) => {
@@ -695,14 +718,10 @@ export default function VideoScrollExperience({
     endTransitionFiredRef.current = true;
     isTransitioningRef.current    = false;
 
-    // Lock out content immediately so agenda never re-flashes during stair wipe
     setContentVisible(false);
 
-    // 1. Stairs wipe IN covering the video
     await runStairIn();
-    // 2. Bring static content to front (video stays mounted underneath)
     setShowStaticContent(true);
-    // 3. Stairs wipe OUT revealing static content
     await runStairOut();
   }, [runStairIn, runStairOut]);
 
@@ -711,22 +730,18 @@ export default function VideoScrollExperience({
     if (returnTransitionFiredRef.current) return;
     returnTransitionFiredRef.current = true;
 
-    // 1. Stairs wipe IN covering static content
     await runStairIn();
 
-    // 2. Reset video state and bring video back to front
     frameFloatRef.current      = LOOPS[LOOPS.length - 1].start;
     currentLoopRef.current     = LOOPS.length - 1;
     loopPlayDirRef.current     = 1;
     isTransitioningRef.current = false;
     directionRef.current       = 0;
-    setShowStaticContent(false); // video div was always mounted; now just raise it
+    setShowStaticContent(false);
 
-    // Reset guards so the full cycle can happen again
     endTransitionFiredRef.current    = false;
     returnTransitionFiredRef.current = false;
 
-    // 3. Stairs wipe OUT revealing video, then show content after reveal completes
     await runStairOut();
     setContentVisible(true);
   }, [runStairIn, runStairOut]);
@@ -981,7 +996,6 @@ export default function VideoScrollExperience({
   return (
     <>
       <style>{`
-        /* ── Stair panels ── */
         .mu-stair-panel {
           position: fixed;
           top: 0;
@@ -996,8 +1010,6 @@ export default function VideoScrollExperience({
         .mu-stair-panel.visible {
           transform: translateY(0%);
         }
-
-        /* ── Header / nav / shared chrome ── */
         .mu-header {
           position: fixed; top: 40px; left: 0; right: 0; z-index: 200;
           display: flex; align-items: center; justify-content: space-between;
@@ -1010,12 +1022,10 @@ export default function VideoScrollExperience({
         }
         .mu-logo-divider { width: 1px; height: 18px; background: rgba(255,255,255,0.3); }
         .mu-logo-school {
-          font-family: var(--font-geist-sans), sans-serif;
           font-size: 16px; font-weight: 600; text-transform: uppercase;
         }
         .mu-header-right { display: flex; align-items: center; gap: 16px; }
         .mu-cta {
-          font-family: var(--font-geist-sans), sans-serif;
           font-size: 14px; font-weight: 600; color: #000; background: #fff;
           border: none; border-radius: 3px; padding: 8px 16px; cursor: pointer; white-space: nowrap;
         }
@@ -1057,16 +1067,16 @@ export default function VideoScrollExperience({
         .mu-collab {
           position: fixed; right: 0; top: 50%;
           transform: translateY(-50%) rotate(90deg); transform-origin: center center;
-          z-index: 200; font-family: var(--font-geist-sans), sans-serif;
-          font-size: 0.6rem; font-weight: 500; letter-spacing: 0.2em; text-transform: uppercase;
-          color: rgba(255,255,255,0.35); white-space: nowrap; pointer-events: none; margin-right: -28px;
+          z-index: 200; font-size: 0.6rem; font-weight: 500;
+          letter-spacing: 0.2em; text-transform: uppercase;
+          color: rgba(255,255,255,0.35); white-space: nowrap;
+          pointer-events: none; margin-right: -28px;
         }
         .mu-loop-content {
           opacity: ${contentVisible ? 1 : 0};
           transition: opacity ${CONTENT_FADE_MS}ms ease;
         }
         .loop-eyebrow {
-          font-family: var(--font-geist-sans), sans-serif;
           font-size: 0.7rem; font-weight: 500; letter-spacing: 0.32em;
           text-transform: uppercase; color: rgba(255,255,255,0.45); margin: 0 0 0.6em 0; min-height: 1em;
         }
@@ -1077,14 +1087,13 @@ export default function VideoScrollExperience({
           text-shadow: 0 2px 24px rgba(0,0,0,0.45);
         }
         .loop-description {
-          font-family: var(--font-geist-sans), sans-serif;
           font-size: clamp(0.85rem, 1.1vw, 1.05rem); font-weight: 300;
           letter-spacing: 0.01em; line-height: 1.5; color: rgba(255,255,255,0.8);
           text-align: right; margin: 0; text-shadow: 0 2px 20px rgba(0,0,0,0.5);
         }
       `}</style>
 
-      {/* ── STAIR PANELS — always in DOM, z-index 500 ── */}
+      {/* ── STAIR PANELS ── */}
       {Array.from({ length: STAIR_COUNT }, (_, i) => (
         <div
           key={i}
@@ -1096,7 +1105,7 @@ export default function VideoScrollExperience({
         />
       ))}
 
-      {/* ── ALWAYS-VISIBLE CHROME ── */}
+      {/* ── HEADER ── */}
       <header className="mu-header">
         <div className="mu-header-left">
           <div className="mu-logo-mark">
@@ -1111,6 +1120,7 @@ export default function VideoScrollExperience({
         </div>
       </header>
 
+      {/* ── SIDENAV ── */}
       <nav className="mu-sidenav">
         <div className="mu-sidenav-track-wrap">
           <div className="mu-sidenav-track" />
@@ -1118,26 +1128,54 @@ export default function VideoScrollExperience({
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
           {NAV_LABELS.map((label, i) => {
-            const navIdx    = activeLoopIdx <= 1 ? 0 : activeLoopIdx - 1;
+            const navIdx    = getNavIdx(activeLoopIdx, showStaticContent);
             const navActive = navIdx === i;
             return (
               <div
                 key={label}
                 ref={(el) => { navItemRefs.current[i] = el; }}
                 className="mu-sidenav-item"
-                onClick={() => {
-                  if (endTransitionFiredRef.current) return;
-                  const loopIdx = i + 1;
-                  if (loopIdx < LOOPS.length) {
-                    setContentVisible(false);
-                    frameFloatRef.current      = LOOPS[loopIdx].start;
-                    currentLoopRef.current     = loopIdx;
-                    loopPlayDirRef.current     = 1;
-                    isTransitioningRef.current = false;
-                    directionRef.current       = 0;
-                    window.setTimeout(() => setContentVisible(true), CONTENT_FADE_MS);
-                  }
-                }}
+           onClick={() => {
+  // ── From static content → jump to a video loop ──────────────────
+  if (showStaticContent) {
+    if (i >= 4) return;
+    const loopIdx = NAV_LOOP_MAP[i];
+    if (loopIdx === undefined) return;
+    if (returnTransitionFiredRef.current) return;
+    returnTransitionFiredRef.current = true;
+    runStairIn().then(async () => {
+      frameFloatRef.current      = LOOPS[loopIdx].start;
+      currentLoopRef.current     = loopIdx;
+      loopPlayDirRef.current     = 1;
+      isTransitioningRef.current = false;
+      directionRef.current       = 0;
+      setShowStaticContent(false);
+      endTransitionFiredRef.current    = false;
+      returnTransitionFiredRef.current = false;
+      await runStairOut();
+      setContentVisible(true);
+    });
+    return;
+  }
+
+  // ── From video → Speakers triggers end transition ────────────────
+  if (i === 4) {
+    triggerEndTransition();
+    return;
+  }
+
+  // ── From video → another video loop ─────────────────────────────
+  if (endTransitionFiredRef.current) return;
+  const loopIdx = NAV_LOOP_MAP[i];
+  if (loopIdx === undefined) return;
+  setContentVisible(false);
+  frameFloatRef.current      = LOOPS[loopIdx].start;
+  currentLoopRef.current     = loopIdx;
+  loopPlayDirRef.current     = 1;
+  isTransitioningRef.current = false;
+  directionRef.current       = 0;
+  window.setTimeout(() => setContentVisible(true), CONTENT_FADE_MS);
+}}
                 style={{ cursor: "pointer" }}
               >
                 <span className={`mu-sidenav-label${navActive ? " active" : ""}`}>{label}</span>
@@ -1147,12 +1185,9 @@ export default function VideoScrollExperience({
         </div>
       </nav>
 
-      <span className="mu-collab">Collaborators</span>
 
-      {/*
-        ── VIDEO LAYER ──────────────────────────────────────────────────────────
-        ALWAYS mounted so WebGL context + render loop never die.
-      */}
+
+      {/* ── VIDEO LAYER — always mounted ── */}
       <div
         ref={wrapperRef}
         style={{
@@ -1168,7 +1203,6 @@ export default function VideoScrollExperience({
           style={{ display: "block", width: "100%", height: "100%", pointerEvents: "none" }}
         />
 
-        {/* Loop content overlay */}
         {(() => {
           const C = activeLoopIdx >= 0 ? LOOP_CONTENT[activeLoopIdx]?.component : null;
           return C ? (
@@ -1214,9 +1248,7 @@ export default function VideoScrollExperience({
         )}
       </div>
 
-      {/*
-        ── STATIC CONTENT LAYER ─────────────────────────────────────────────────────
-      */}
+      {/* ── STATIC CONTENT LAYER ── */}
       <div
         ref={staticScrollRef}
         style={{
@@ -1229,13 +1261,8 @@ export default function VideoScrollExperience({
           isolation: "isolate",
         }}
       >
-        {/* ── Starfield background canvas — sits behind all content ── */}
         <StarfieldBackground />
 
-        {/*
-          Loop6 (SpeakerSwiper): minHeight auto + overflow visible so the
-          two speaker rows + logo row are never clipped by section bounds.
-        */}
         <section style={{ position: "relative", width: "100vw", minHeight: "auto", zIndex: 1, overflow: "visible" }}>
           <Loop6 />
         </section>
