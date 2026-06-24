@@ -68,7 +68,7 @@ function xForVirtual(v: number): string {
 function SpeakerCard({ speaker, isCenter }: { speaker: Speaker; isCenter: boolean }) {
   return (
     <div
-      className="flex-shrink-0 overflow-hidden transition-all duration-500"
+      className="flex-shrink-0 overflow-hidden transition-all duration-500 rounded-lg"
       style={{
         width: CARD_W,
         marginRight: CARD_GAP,
@@ -84,8 +84,8 @@ function SpeakerCard({ speaker, isCenter }: { speaker: Speaker; isCenter: boolea
         <div
           className="flex-shrink-0 transition-all duration-500"
           style={{
-            width: isCenter ? 230 : 172,
-            height: isCenter ? 215 : 161,
+            width: isCenter ? 230 : 230,
+            height: isCenter ? 215 : 215,
             backgroundImage: `url(${speaker.img})`,
             backgroundSize: 'cover',
             backgroundPosition: 'center top',
@@ -93,14 +93,15 @@ function SpeakerCard({ speaker, isCenter }: { speaker: Speaker; isCenter: boolea
           }}
         />
         <div className="flex flex-col">
+          <div className="mt-1 mb-2 w-7 h-0.5 rounded-full" style={{ background: 'linear-gradient(90deg, #D07D41 0%, rgba(221, 138, 66, 0) 100%)' }} />
           <p
-            className="font-sans font-semibold uppercase tracking-wide text-white leading-tight"
-            style={{ fontSize: isCenter ? 18 : 14 }}
+            className="font-sans font-semibold uppercase tracking-wide text-white leading-none"
+            style={{ fontSize: isCenter ? 32 : 24 }}
           >
             {speaker.name}
           </p>
-          <div className="mt-1 mb-2 w-7 h-0.5 rounded-full bg-[#C9A84C]" />
-          <p className="font-sans uppercase tracking-widest text-white/50 text-[10px]">
+
+          <p className="font-sans uppercase tracking-[8%] text-[#FFFFFF] text-[12px] mt-4 ">
             {speaker.title}
           </p>
         </div>

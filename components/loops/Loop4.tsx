@@ -9,8 +9,8 @@ gsap.registerPlugin(SplitText)
 const FRONTIERS = [
   { label: 'Gene Editing & CRISPR',   position: 'bottom-[37.5%] right-[23%]'    },
   { label: 'Longevity & Aging',        position: 'bottom-[25%] right-[23%]'   },
-  { label: 'Computational Biology',    position: 'bottom-[12.5%] right-[23%]'    },
-  { label: 'Drug & Gene Discovery',    position: 'bottom-[50%] right-[3%]'   },
+  { label: 'Computational Biology',    position: 'bottom-[12.5%] right-[12.5%]'    },
+  { label: 'Drug & Gene Discovery',    position: 'bottom-[50%] right-[12.5%]'   },
   { label: 'Biomanufacturing',         position: 'bottom-[37.5%] right-[3%]'    },
   { label: 'Space & Agri-biology',     position: 'bottom-[25%] right-[3%]'   },
 ]
@@ -58,7 +58,7 @@ export default function Loop3() {
   key={f.label}
   ref={el => { cardsRef.current[i] = el }}
   style={{ padding: '24px 0px' }}
-  className={`absolute ${f.position} backdrop-blur-sm bg-white/40 border border-white/10 rounded-sm  min-w-[280px] `}
+  className={`absolute ${f.position} backdrop-blur-sm bg-white/10 border border-white/10 rounded-[12px]  min-w-[280px] `}
 >
           <span className=" text-[20px] font-light text-white   flex justify-center items-center leading-[27px]">
             {f.label}
