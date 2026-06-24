@@ -73,14 +73,14 @@ function SpeakerCard({ speaker, isCenter }: { speaker: Speaker; isCenter: boolea
         width: CARD_W,
         marginRight: CARD_GAP,
         border: isCenter
-          ? '1.5px solid rgba(255,255,255,0.25)'
+          ? '1.5px solid rgba(255,255,255,0.06)'
           : '1.5px solid rgba(255,255,255,0.06)',
         background: isCenter ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.02)',
         opacity: isCenter ? 1 : 0.45,
         transform: isCenter ? 'scale(1)' : 'scale(0.92)',
       }}
     >
-      <div className="flex items-center gap-5 px-6 py-5">
+      <div className="flex items-center gap-5  ">
         <div
           className="flex-shrink-0 transition-all duration-500"
           style={{
@@ -114,15 +114,15 @@ function LogoRow({ activeReal }: { activeReal: number }) {
   const SPACING = 160
   return (
     <div
-      className="relative w-full h-[100px]"
+      className="relative w-full h-[70px] ml-16"
       style={{ perspective: '1200px', perspectiveOrigin: '50% 50%' }}
     >
       <div
-        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none"
+        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none "
         style={{
           width: 260,
           height: 90,
-          background: 'radial-gradient(ellipse at center, rgba(201,168,76,0.20) 0%, transparent 70%)',
+          
         }}
       />
       {LOGOS.map((logo, i) => {
@@ -174,7 +174,7 @@ function SpeakerRow({
   pointerProps: React.HTMLAttributes<HTMLDivElement>
 }) {
   return (
-    <div className="relative w-full h-[320px] overflow-hidden cursor-grab" {...pointerProps}>
+    <div className="relative w-full h-[215px] overflow-hidden cursor-grab ml-55 my-8 " {...pointerProps}>
       <div
         className="absolute top-1/2 flex items-center will-change-transform"
         style={{
@@ -262,7 +262,7 @@ export default function SpeakerSwiper() {
   const pp = { onPointerDown, onPointerMove, onPointerUp }
 
   return (
-    <section className="relative w-full flex flex-col items-center py-8 select-none pointer-events-auto">
+    <section className="relative w-full flex flex-col items-center py-8 mt-10 select-none pointer-events-auto h-full font-sans">
       <SpeakerRow track={track1} virtualIndex={virtualIndex} prefix="r1" pointerProps={pp} />
 
       <div className="relative w-full cursor-grab" style={{ margin: '20px 0' }} {...pp}>
