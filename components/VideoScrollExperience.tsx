@@ -30,8 +30,8 @@ const ZOOM              = 1.12;
 const CONTENT_FADE_MS   = 280;
 
 // ── Stair transition config ───────────────────────────────────────────────────
-const STAIR_COUNT       = 5;
-const STAIR_DURATION_MS = 180;
+const STAIR_COUNT       = 7;
+const STAIR_DURATION_MS = 20;
 const STAIR_SETTLE_MS   = 600;
 
 // ── Loop ranges (0-indexed) ───────────────────────────────────────────────────
