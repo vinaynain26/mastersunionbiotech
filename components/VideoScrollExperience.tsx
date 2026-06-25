@@ -16,6 +16,7 @@ import Image from "next/image";
 import AgendaContent from "./loops/Agenda";
 import HighContent from "./loops/HighContent";
 import StarfieldBackground from "./StarfieldBackground";
+import Footer from "./Footer";
 
 gsap.registerPlugin(SplitText);
 
@@ -354,6 +355,9 @@ export default function VideoScrollExperience({
 
   const staticScrollRef = useRef<HTMLDivElement>(null);
 
+  const [footerVisible, setFooterVisible] = useState(false);
+const footerRef = useRef<HTMLDivElement>(null);
+
   // ── Pill position ─────────────────────────────────────────────────────────
   useEffect(() => {
     const navIdx  = getNavIdx(activeLoopIdx, showStaticContent);
@@ -364,6 +368,20 @@ export default function VideoScrollExperience({
     const itemRect = item.getBoundingClientRect();
     setPillTop(itemRect.top - wrapTop + itemRect.height / 2);
   }, [activeLoopIdx, showStaticContent]);
+
+  // ── Footer visibility ─────────────────────────────────────────────────────  ← ADD HERE
+useEffect(() => {
+  const footer    = footerRef.current;
+  const container = staticScrollRef.current;
+  if (!footer || !container) return;
+
+  const observer = new IntersectionObserver(
+    ([entry]) => setFooterVisible(entry.isIntersecting),
+    { root: container, threshold: 0.1 }
+  );
+  observer.observe(footer);
+  return () => observer.disconnect();
+}, [showStaticContent]);
 
   // ── WebGL helpers ─────────────────────────────────────────────────────────
   const blit = useCallback((fbo: WebGLFramebuffer | null, w: number, h: number) => {
@@ -1106,7 +1124,7 @@ export default function VideoScrollExperience({
       ))}
 
       {/* ── HEADER ── */}
-      <header className="mu-header">
+      <header className="mu-header" style={{ display: footerVisible ? 'none' : 'flex' }}>
         <div className="mu-header-left">
           <div className="mu-logo-mark">
             <img src="https://cdn.unionstack.link/uploads/18062026/v1/muLogo.svg" alt="muLogo" />
@@ -1121,7 +1139,7 @@ export default function VideoScrollExperience({
       </header>
 
       {/* ── SIDENAV ── */}
-      <nav className="mu-sidenav">
+      <nav className="mu-sidenav" style={{ display: footerVisible ? 'none' : 'flex' }}>
         <div className="mu-sidenav-track-wrap">
           <div className="mu-sidenav-track" />
           <div className="mu-sidenav-indicator" style={{ top: `${pillTop}px` }} />
@@ -1272,6 +1290,10 @@ export default function VideoScrollExperience({
         <section style={{ position: "relative", width: "100vw", minHeight: "100vh", zIndex: 1 }}>
           <Loop9 />
         </section>
+<div ref={footerRef}>
+  <Footer />
+</div>
+
       </div>
     </>
   );

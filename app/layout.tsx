@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
 
+
 const ppMori = localFont({
   src: [
     { path: "./fonts/PPMori-Extralight.otf", weight: "200", style: "normal" },
@@ -26,7 +27,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={`${ppMori.variable} h-full antialiased`}>
-      <body className="min-h-full flex flex-col font-sans">{children}</body>
+      <body className="min-h-full flex flex-col font-sans">{children}
+      </body>
     </html>
   );
 }
