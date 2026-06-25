@@ -17,6 +17,7 @@ import AgendaContent from "./loops/Agenda";
 import HighContent from "./loops/HighContent";
 import StarfieldBackground from "./StarfieldBackground";
 import Footer from "./Footer";
+import Passes from "./loops/Passes";
 
 gsap.registerPlugin(SplitText);
 
@@ -1340,6 +1341,9 @@ export default function VideoScrollExperience({
         </section>
         <section style={{ position: "relative", width: "100vw",  zIndex: 1 }}>
           <Loop8 />
+        </section>
+        <section style={{ position: "relative", width: "100vw",  zIndex: 1 }}>
+          <Passes />
         </section>
         <section style={{ position: "relative", width: "100vw",  zIndex: 1 }}>
           <Loop9 />
