@@ -58,11 +58,6 @@ const LOOP_CONTENT = [
 const NAV_LABELS = ["Origin", "Discover", "Highlights", "Agenda", "Speakers", "Awards", "Passes"];
 
 // Loop index → nav index mapping
-// Loops 0,1,2 → Origin (0)
-// Loops 3,4   → Discover (1)
-// Loop 5      → Highlights (2)
-// Loop 6      → Agenda (3)
-// Static content starts at Speakers (4)
 const getNavIdx = (activeLoopIdx: number, showStaticContent: boolean) => {
   if (showStaticContent) return 4;
   if (activeLoopIdx <= 2) return 0;
@@ -291,6 +286,10 @@ export default function VideoScrollExperience({
   const canvasRef  = useRef<HTMLCanvasElement>(null);
   const glRef      = useRef<WebGLRenderingContext | null>(null);
 
+  // ── NEW: refs for GSAP-animated UI chrome ────────────────────────────────
+  const headerRef  = useRef<HTMLElement>(null);
+  const sidenavRef = useRef<HTMLElement>(null);
+
   const frameTextures = useRef<(WebGLTexture | null)[]>([]);
   const textureReady  = useRef<boolean[]>([]);
   const loadingSet    = useRef<Set<number>>(new Set());
@@ -356,7 +355,7 @@ export default function VideoScrollExperience({
   const staticScrollRef = useRef<HTMLDivElement>(null);
 
   const [footerVisible, setFooterVisible] = useState(false);
-const footerRef = useRef<HTMLDivElement>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
 
   // ── Pill position ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -369,19 +368,57 @@ const footerRef = useRef<HTMLDivElement>(null);
     setPillTop(itemRect.top - wrapTop + itemRect.height / 2);
   }, [activeLoopIdx, showStaticContent]);
 
-  // ── Footer visibility ─────────────────────────────────────────────────────  ← ADD HERE
-useEffect(() => {
-  const footer    = footerRef.current;
-  const container = staticScrollRef.current;
-  if (!footer || !container) return;
+  // ── Footer visibility — GSAP animated chrome hide/show ───────────────────
+  useEffect(() => {
+    const footer    = footerRef.current;
+    const container = staticScrollRef.current;
+    const header    = headerRef.current;
+    const sidenav   = sidenavRef.current;
+    if (!footer || !container) return;
 
-  const observer = new IntersectionObserver(
-    ([entry]) => setFooterVisible(entry.isIntersecting),
-    { root: container, threshold: 0.1 }
-  );
-  observer.observe(footer);
-  return () => observer.disconnect();
-}, [showStaticContent]);
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        const entering = entry.isIntersecting;
+        setFooterVisible(entering);
+
+        // Only animate if refs exist (they won't exist when static content is hidden)
+        if (header && sidenav) {
+          // Kill any in-flight tweens on these targets first
+          gsap.killTweensOf([header, sidenav]);
+
+          if (entering) {
+            // Footer coming into view → slide UI chrome up and fade out
+            gsap.to([header, sidenav], {
+              opacity:  0,
+              y:       -16,
+              duration: 0.5,
+              ease:     "power3.inOut",
+              onStart: () => {
+                // Disable pointer events immediately when hiding begins
+                gsap.set([header, sidenav], { pointerEvents: "none" });
+              },
+            });
+          } else {
+            // Footer leaving view → restore UI chrome
+            gsap.to([header, sidenav], {
+              opacity:  1,
+              y:        0,
+              duration: 0.55,
+              ease:     "power3.out",
+              onComplete: () => {
+                // Re-enable pointer events only after fully visible
+                gsap.set([header, sidenav], { pointerEvents: "auto" });
+              },
+            });
+          }
+        }
+      },
+      { root: container, threshold: 0.1 }
+    );
+
+    observer.observe(footer);
+    return () => observer.disconnect();
+  }, [showStaticContent]);
 
   // ── WebGL helpers ─────────────────────────────────────────────────────────
   const blit = useCallback((fbo: WebGLFramebuffer | null, w: number, h: number) => {
@@ -740,6 +777,15 @@ useEffect(() => {
 
     await runStairIn();
     setShowStaticContent(true);
+
+    // Ensure chrome is visible when entering static content
+    const header  = headerRef.current;
+    const sidenav = sidenavRef.current;
+    if (header && sidenav) {
+      gsap.killTweensOf([header, sidenav]);
+      gsap.set([header, sidenav], { opacity: 1, y: 0, pointerEvents: "auto" });
+    }
+
     await runStairOut();
   }, [runStairIn, runStairOut]);
 
@@ -747,6 +793,14 @@ useEffect(() => {
   const triggerReturnToVideo = useCallback(async () => {
     if (returnTransitionFiredRef.current) return;
     returnTransitionFiredRef.current = true;
+
+    // Ensure chrome snaps back to visible before stair-out
+    const header  = headerRef.current;
+    const sidenav = sidenavRef.current;
+    if (header && sidenav) {
+      gsap.killTweensOf([header, sidenav]);
+      gsap.set([header, sidenav], { opacity: 1, y: 0, pointerEvents: "auto" });
+    }
 
     await runStairIn();
 
@@ -1032,6 +1086,7 @@ useEffect(() => {
           position: fixed; top: 40px; left: 0; right: 0; z-index: 200;
           display: flex; align-items: center; justify-content: space-between;
           padding: 0 clamp(16px, 3vw, 40px); height: 56px;
+          will-change: transform, opacity;
         }
         .mu-header-left { display: flex; align-items: center; gap: 12px; }
         .mu-logo-mark {
@@ -1058,6 +1113,7 @@ useEffect(() => {
           position: fixed; left: 20px; top: 50%; transform: translateY(-50%);
           z-index: 200; display: flex; flex-direction: row; align-items: flex-start;
           gap: 16px; pointer-events: none;
+          will-change: transform, opacity;
         }
         .mu-sidenav-track-wrap { position: relative; width: 12px; align-self: stretch; flex-shrink: 0; }
         .mu-sidenav-track {
@@ -1124,7 +1180,7 @@ useEffect(() => {
       ))}
 
       {/* ── HEADER ── */}
-      <header className="mu-header" style={{ display: footerVisible ? 'none' : 'flex' }}>
+      <header ref={headerRef} className="mu-header">
         <div className="mu-header-left">
           <div className="mu-logo-mark">
             <img src="https://cdn.unionstack.link/uploads/18062026/v1/muLogo.svg" alt="muLogo" />
@@ -1139,7 +1195,7 @@ useEffect(() => {
       </header>
 
       {/* ── SIDENAV ── */}
-      <nav className="mu-sidenav" style={{ display: footerVisible ? 'none' : 'flex' }}>
+      <nav ref={sidenavRef} className="mu-sidenav">
         <div className="mu-sidenav-track-wrap">
           <div className="mu-sidenav-track" />
           <div className="mu-sidenav-indicator" style={{ top: `${pillTop}px` }} />
@@ -1153,47 +1209,47 @@ useEffect(() => {
                 key={label}
                 ref={(el) => { navItemRefs.current[i] = el; }}
                 className="mu-sidenav-item"
-           onClick={() => {
-  // ── From static content → jump to a video loop ──────────────────
-  if (showStaticContent) {
-    if (i >= 4) return;
-    const loopIdx = NAV_LOOP_MAP[i];
-    if (loopIdx === undefined) return;
-    if (returnTransitionFiredRef.current) return;
-    returnTransitionFiredRef.current = true;
-    runStairIn().then(async () => {
-      frameFloatRef.current      = LOOPS[loopIdx].start;
-      currentLoopRef.current     = loopIdx;
-      loopPlayDirRef.current     = 1;
-      isTransitioningRef.current = false;
-      directionRef.current       = 0;
-      setShowStaticContent(false);
-      endTransitionFiredRef.current    = false;
-      returnTransitionFiredRef.current = false;
-      await runStairOut();
-      setContentVisible(true);
-    });
-    return;
-  }
+                onClick={() => {
+                  // ── From static content → jump to a video loop ──────────────────
+                  if (showStaticContent) {
+                    if (i >= 4) return;
+                    const loopIdx = NAV_LOOP_MAP[i];
+                    if (loopIdx === undefined) return;
+                    if (returnTransitionFiredRef.current) return;
+                    returnTransitionFiredRef.current = true;
+                    runStairIn().then(async () => {
+                      frameFloatRef.current      = LOOPS[loopIdx].start;
+                      currentLoopRef.current     = loopIdx;
+                      loopPlayDirRef.current     = 1;
+                      isTransitioningRef.current = false;
+                      directionRef.current       = 0;
+                      setShowStaticContent(false);
+                      endTransitionFiredRef.current    = false;
+                      returnTransitionFiredRef.current = false;
+                      await runStairOut();
+                      setContentVisible(true);
+                    });
+                    return;
+                  }
 
-  // ── From video → Speakers triggers end transition ────────────────
-  if (i === 4) {
-    triggerEndTransition();
-    return;
-  }
+                  // ── From video → Speakers triggers end transition ────────────────
+                  if (i === 4) {
+                    triggerEndTransition();
+                    return;
+                  }
 
-  // ── From video → another video loop ─────────────────────────────
-  if (endTransitionFiredRef.current) return;
-  const loopIdx = NAV_LOOP_MAP[i];
-  if (loopIdx === undefined) return;
-  setContentVisible(false);
-  frameFloatRef.current      = LOOPS[loopIdx].start;
-  currentLoopRef.current     = loopIdx;
-  loopPlayDirRef.current     = 1;
-  isTransitioningRef.current = false;
-  directionRef.current       = 0;
-  window.setTimeout(() => setContentVisible(true), CONTENT_FADE_MS);
-}}
+                  // ── From video → another video loop ─────────────────────────────
+                  if (endTransitionFiredRef.current) return;
+                  const loopIdx = NAV_LOOP_MAP[i];
+                  if (loopIdx === undefined) return;
+                  setContentVisible(false);
+                  frameFloatRef.current      = LOOPS[loopIdx].start;
+                  currentLoopRef.current     = loopIdx;
+                  loopPlayDirRef.current     = 1;
+                  isTransitioningRef.current = false;
+                  directionRef.current       = 0;
+                  window.setTimeout(() => setContentVisible(true), CONTENT_FADE_MS);
+                }}
                 style={{ cursor: "pointer" }}
               >
                 <span className={`mu-sidenav-label${navActive ? " active" : ""}`}>{label}</span>
@@ -1202,8 +1258,6 @@ useEffect(() => {
           })}
         </div>
       </nav>
-
-
 
       {/* ── VIDEO LAYER — always mounted ── */}
       <div
@@ -1284,16 +1338,15 @@ useEffect(() => {
         <section style={{ position: "relative", width: "100vw", minHeight: "auto", zIndex: 1, overflow: "visible" }}>
           <Loop6 />
         </section>
-        <section style={{ position: "relative", width: "100vw", minHeight: "100vh", zIndex: 1 }}>
+        <section style={{ position: "relative", width: "100vw",  zIndex: 1 }}>
           <Loop8 />
         </section>
-        <section style={{ position: "relative", width: "100vw", minHeight: "100vh", zIndex: 1 }}>
+        <section style={{ position: "relative", width: "100vw",  zIndex: 1 }}>
           <Loop9 />
         </section>
-<div ref={footerRef}>
-  <Footer />
-</div>
-
+        <div ref={footerRef}>
+          <Footer />
+        </div>
       </div>
     </>
   );
