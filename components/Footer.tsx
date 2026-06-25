@@ -78,10 +78,13 @@ const legalLinks = [
 
 export default function Footer() {
   return (
-    <footer className="bg-black/10 backdrop-blur-xs text-white font-sans  ">
+    <footer
+  className="text-white font-sans bg-cover bg-center bg-no-repeat backdrop-blur-2xl"
+  style={{ backgroundImage: "url('https://cdn.unionstack.link/uploads/25062026/v1/footer.png')" }}
+>
 
       {/* ── Top Block ── */}
-      <div className=" mx-auto px-10">
+      <div className=" mx-auto px-10 pt-10">
 
         {/* Logo Row */}
         <div className="flex items-center  mb-14">
